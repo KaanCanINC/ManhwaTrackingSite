@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<myanimelist>
+
+      <manga>
+        <series_title>asddasdas</series_title>
+        <series_chapters>0</series_chapters>
+        <my_read_chapters>5</my_read_chapters>
+        <my_start_date>0000-00-00</my_start_date>
+        <my_finish_date>0000-00-00</my_finish_date>
+        <my_score>0</my_score>
+        <my_status>Plan to Read</my_status>
+        <my_comments></my_comments>
+      </manga>
+
+      <manga>
+        <series_title>Nano machine</series_title>
+        <series_chapters>0</series_chapters>
+        <my_read_chapters>1</my_read_chapters>
+        <my_start_date>0000-00-00</my_start_date>
+        <my_finish_date>0000-00-00</my_finish_date>
+        <my_score>10</my_score>
+        <my_status>Plan to Read</my_status>
+        <my_comments></my_comments>
+      </manga>
+</myanimelist>

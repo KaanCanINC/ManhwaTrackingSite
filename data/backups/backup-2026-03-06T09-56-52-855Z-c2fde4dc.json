@@ -1,0 +1,23 @@
+{
+  "createdAt": "2026-03-06T09:56:52.855Z",
+  "reason": "change",
+  "series": [
+    {
+      "id": "77d05909-e5ab-4d42-a753-ebd2bd8df95c",
+      "title": "Nano machine",
+      "totalChapters": 4,
+      "chaptersRead": 0,
+      "startDate": null,
+      "finishDate": null,
+      "rating": 10,
+      "personalNotes": "",
+      "status": "plan_to_read",
+      "reread": true,
+      "novelToRead": true,
+      "followUpdates": true,
+      "createdAt": "2026-03-06T09:56:52.854Z",
+      "updatedAt": "2026-03-06T09:56:52.854Z",
+      "sources": []
+    }
+  ]
+}

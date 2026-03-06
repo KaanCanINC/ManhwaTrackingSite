@@ -1,0 +1,40 @@
+{
+  "createdAt": "2026-03-06T10:09:21.575Z",
+  "reason": "change",
+  "series": [
+    {
+      "id": "40dd5ba0-bf09-4469-9459-9b3697d68baa",
+      "title": "asddasdas",
+      "totalChapters": 0,
+      "chaptersRead": 1,
+      "startDate": null,
+      "finishDate": null,
+      "rating": null,
+      "personalNotes": "",
+      "status": "plan_to_read",
+      "reread": false,
+      "novelToRead": false,
+      "followUpdates": false,
+      "createdAt": "2026-03-06T09:57:41.256Z",
+      "updatedAt": "2026-03-06T10:09:21.575Z",
+      "sources": []
+    },
+    {
+      "id": "77d05909-e5ab-4d42-a753-ebd2bd8df95c",
+      "title": "Nano machine",
+      "totalChapters": 4,
+      "chaptersRead": 0,
+      "startDate": null,
+      "finishDate": null,
+      "rating": 10,
+      "personalNotes": "",
+      "status": "plan_to_read",
+      "reread": true,
+      "novelToRead": true,
+      "followUpdates": true,
+      "createdAt": "2026-03-06T09:56:52.854Z",
+      "updatedAt": "2026-03-06T09:56:52.854Z",
+      "sources": []
+    }
+  ]
+}

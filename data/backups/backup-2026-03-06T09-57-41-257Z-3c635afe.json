@@ -1,0 +1,53 @@
+{
+  "createdAt": "2026-03-06T09:57:41.257Z",
+  "reason": "change",
+  "series": [
+    {
+      "id": "40dd5ba0-bf09-4469-9459-9b3697d68baa",
+      "title": "asddasdas",
+      "totalChapters": 0,
+      "chaptersRead": 0,
+      "startDate": null,
+      "finishDate": null,
+      "rating": null,
+      "personalNotes": "",
+      "status": "plan_to_read",
+      "reread": false,
+      "novelToRead": false,
+      "followUpdates": true,
+      "createdAt": "2026-03-06T09:57:41.256Z",
+      "updatedAt": "2026-03-06T09:57:41.256Z",
+      "sources": [
+        {
+          "id": "add309c9-c4e9-41e5-9d9e-f9c7dd5bb30c",
+          "seriesId": "40dd5ba0-bf09-4469-9459-9b3697d68baa",
+          "type": "TR",
+          "url": "https://asurascans.com.tr/manga/helmut-the-forsaken-child/bolum-21/"
+        },
+        {
+          "id": "59d15359-bf3c-404e-b84a-0396c9a41e55",
+          "seriesId": "40dd5ba0-bf09-4469-9459-9b3697d68baa",
+          "type": "EN",
+          "url": "https://asurascans.com.tr/manga/helmut-the-forsaken-child/bolum-21/"
+        }
+      ]
+    },
+    {
+      "id": "77d05909-e5ab-4d42-a753-ebd2bd8df95c",
+      "title": "Nano machine",
+      "totalChapters": 4,
+      "chaptersRead": 0,
+      "startDate": null,
+      "finishDate": null,
+      "rating": 10,
+      "personalNotes": "",
+      "status": "plan_to_read",
+      "reread": true,
+      "novelToRead": true,
+      "followUpdates": true,
+      "createdAt": "2026-03-06T09:56:52.854Z",
+      "updatedAt": "2026-03-06T09:56:52.854Z",
+      "sources": []
+    }
+  ]
+}

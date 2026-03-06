@@ -1,0 +1,13 @@
+services:
+  manhwa-tracker:
+    build: .
+    container_name: manhwa-tracker
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATA_DIR=/data
+      - MAX_BACKUPS=60
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
