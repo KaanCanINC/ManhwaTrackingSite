@@ -1,4 +1,4 @@
-import type { RereadSession, SeriesSource, SeriesStatus, SourceType } from "@/lib/types";
+import type { PreferredSourceType, RereadSession, SeriesSource, SeriesStatus } from "@/lib/types";
 
 export type { RereadSession };
 
@@ -75,10 +75,15 @@ export function statusBg(status: SeriesStatus): string {
 
 export function getPreferredSource(
   sources: SeriesSource[],
-  preferredSourceType: SourceType | null,
+  preferredSourceType: PreferredSourceType | null,
 ): SeriesSource | null {
   if (preferredSourceType) {
-    const match = sources.find((source) => source.type === preferredSourceType);
+    const match =
+      preferredSourceType === "MAL"
+        ? sources.find((source) => source.site === "myanimelist")
+        : preferredSourceType === "ANILIST"
+          ? sources.find((source) => source.site === "anilist")
+          : sources.find((source) => source.type === preferredSourceType);
     if (match) return match;
   }
   return sources.find((source) => source.type === "TR") || sources.find((source) => source.type === "EN") || null;

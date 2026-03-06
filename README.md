@@ -1,36 +1,91 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Manhwa Tracking Site
 
-## Getting Started
+Self-hosted manhwa/manga tracking app built with Next.js + SQLite.
 
-First, run the development server:
+## Storage Model
+
+The app keeps all persistent data on disk and supports a root data directory plus per-folder overrides.
+
+- `DATA_DIR`: root directory for persistent files.
+- `DB_DIR`: SQLite directory (defaults to `${DATA_DIR}/database`).
+- `BACKUPS_DIR`: backup JSON directory (defaults to `${DATA_DIR}/backups`).
+- `IMPORTS_DIR`: raw import archive directory (defaults to `${DATA_DIR}/imports`).
+- `MAX_BACKUPS`: maximum number of backup snapshots kept.
+
+If override variables are not set, the app is backward compatible and uses `DATA_DIR` children.
+
+## Local Development
 
 ```bash
+npm ci
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Default local storage is `<project>/data` unless you set `DATA_DIR`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Example with custom storage root:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+DATA_DIR=/tmp/manhwa-tracker-data npm run dev
+```
 
-## Learn More
+## Self-Hosted (Docker Compose)
 
-To learn more about Next.js, take a look at the following resources:
+The provided `docker-compose.yml` is configured for persistent host paths and non-root execution.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Default host mount targets:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- `/var/lib/casaos/appdata/manhwa-tracker/database` -> `/data/database`
+- `/var/lib/casaos/appdata/manhwa-tracker/backups` -> `/data/backups`
+- `/var/lib/casaos/appdata/manhwa-tracker/imports` -> `/data/imports`
 
-## Deploy on Vercel
+Start:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+docker compose up -d --build
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+You can override host paths without editing compose:
+
+```bash
+HOST_DB_DIR=/mnt/storage/manhwa/database \
+HOST_BACKUPS_DIR=/mnt/storage/manhwa/backups \
+HOST_IMPORTS_DIR=/mnt/storage/manhwa/imports \
+docker compose up -d --build
+```
+
+Optional UID/GID override:
+
+```bash
+PUID=1000 PGID=1000 docker compose up -d --build
+```
+
+## Migration from `./data` (Old Layout)
+
+If you previously used `./data:/data` mount, migrate once:
+
+1. Stop container.
+2. Create target dirs on host.
+3. Copy old files.
+4. Fix ownership.
+5. Start with new compose config.
+
+Example:
+
+```bash
+docker compose down
+sudo mkdir -p /var/lib/casaos/appdata/manhwa-tracker/{database,backups,imports}
+sudo cp -a ./data/database/. /var/lib/casaos/appdata/manhwa-tracker/database/
+sudo cp -a ./data/backups/. /var/lib/casaos/appdata/manhwa-tracker/backups/
+sudo cp -a ./data/imports/. /var/lib/casaos/appdata/manhwa-tracker/imports/
+sudo chown -R 1000:1000 /var/lib/casaos/appdata/manhwa-tracker
+docker compose up -d --build
+```
+
+## Quality Checks
+
+```bash
+npm run lint
+npm run test -- --run
+npm run build
+```

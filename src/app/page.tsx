@@ -1,9 +1,10 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { BookOpen, Download, Plus, RefreshCw, Shield, Star, Upload, X } from "lucide-react";
 import { FormEvent, MouseEvent, useEffect, useMemo, useState } from "react";
-import type { Series, SeriesStatus as Status, SourceType } from "@/lib/types";
+import type { PreferredSourceType, Series, SeriesStatus as Status, SourceType } from "@/lib/types";
 import {
   clampInt,
   coverGradient,
@@ -50,6 +51,27 @@ type SourceMetaOverride = {
   scraperName: string | null;
   lastError: { message: string; timestamp: string } | null;
   meta: Record<string, unknown> | null;
+};
+
+type BackupListItem = {
+  id: string;
+  fileName: string;
+  reason: string;
+  createdAt: string;
+  sizeBytes: number;
+};
+
+type ImportPreviewItem = {
+  index: number;
+  title: string;
+  status: Status;
+  totalChapters: number;
+  chaptersRead: number;
+};
+
+type Notice = {
+  tone: "success" | "error" | "info";
+  message: string;
 };
 
 function resolveSourcePayload(
@@ -102,7 +124,7 @@ type FormState = {
   finishDate: string;
   trUrl: string;
   enUrl: string;
-  preferredSourceType: SourceType | null;
+  preferredSourceType: PreferredSourceType | null;
   coverImageBase64: string | null;
   coverImageMimeType: string | null;
   coverImageFetchedAt: string | null;
@@ -156,9 +178,12 @@ function MangaCard({
       <div className="relative overflow-hidden rounded-lg bg-gray-900 shadow-lg transition-all duration-300 hover:scale-105 hover:shadow-2xl">
         <div className="aspect-2/3 overflow-hidden" style={{ background: coverGradient(item.title) }}>
           {item.hasCoverImage ? (
-            <img
+            <Image
               src={`/api/series/${item.id}/cover?u=${encodeURIComponent(item.updatedAt)}`}
               alt={`${item.title} cover`}
+              width={320}
+              height={480}
+              unoptimized
               className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-110"
             />
           ) : (
@@ -248,7 +273,7 @@ function MangaCard({
   );
 }
 
-function AddSeriesModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
+function AddSeriesModal({ onClose, onAdded, onNotify }: { onClose: () => void; onAdded: () => void; onNotify: (notice: Notice) => void }) {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [scrapingSource, setScrapingSource] = useState<SourceType | null>(null);
@@ -355,7 +380,11 @@ function AddSeriesModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
     const sources = [trSource, enSource].filter(Boolean);
 
     const preferredExists = form.preferredSourceType
-      ? sources.some((source) => source?.type === form.preferredSourceType)
+      ? form.preferredSourceType === "MAL"
+        ? sources.some((source) => source?.site === "myanimelist")
+        : form.preferredSourceType === "ANILIST"
+          ? sources.some((source) => source?.site === "anilist")
+          : sources.some((source) => source?.type === form.preferredSourceType)
       : false;
 
     const res = await fetch("/api/series", {
@@ -394,7 +423,7 @@ function AddSeriesModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
     }
 
     const err = (await res.json()) as unknown;
-    alert(JSON.stringify(err));
+    onNotify({ tone: "error", message: `Add failed: ${JSON.stringify(err)}` });
   }
 
   const inputCls =
@@ -471,7 +500,7 @@ function AddSeriesModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
             <select
               value={form.preferredSourceType || ""}
               onChange={(e) =>
-                f("preferredSourceType", (e.target.value ? (e.target.value as SourceType) : null) as SourceType | null)
+                f("preferredSourceType", (e.target.value ? (e.target.value as PreferredSourceType) : null) as PreferredSourceType | null)
               }
               className={inputCls}
             >
@@ -648,30 +677,108 @@ function AddSeriesModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
   );
 }
 
-function ImportModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+function ImportModal({
+  onClose,
+  onDone,
+  onNotify,
+}: {
+  onClose: () => void;
+  onDone: () => void;
+  onNotify: (notice: Notice) => void;
+}) {
   const [malContent, setMalContent] = useState("");
   const [aniContent, setAniContent] = useState("");
+  const [previewSource, setPreviewSource] = useState<"mal" | "anilist" | null>(null);
+  const [previewItems, setPreviewItems] = useState<ImportPreviewItem[]>([]);
+  const [selectedIndices, setSelectedIndices] = useState<number[]>([]);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [importing, setImporting] = useState(false);
 
-  async function runImport(source: "mal" | "anilist") {
+  async function readTextFile(file: File): Promise<string> {
+    return await file.text();
+  }
+
+  async function onFilePick(source: "mal" | "anilist", file: File | null) {
+    if (!file) return;
+    const text = await readTextFile(file);
+    if (source === "mal") setMalContent(text);
+    else setAniContent(text);
+  }
+
+  function toggleSelection(index: number) {
+    setSelectedIndices((prev) =>
+      prev.includes(index) ? prev.filter((item) => item !== index) : [...prev, index],
+    );
+  }
+
+  function selectAll() {
+    setSelectedIndices(previewItems.map((item) => item.index));
+  }
+
+  function clearSelection() {
+    setSelectedIndices([]);
+  }
+
+  async function runPreview(source: "mal" | "anilist") {
     const content = source === "mal" ? malContent : aniContent;
     if (!content.trim()) {
-      alert("Paste content first.");
+      onNotify({ tone: "error", message: "Import content is empty." });
       return;
     }
 
-    const res = await fetch(`/api/import/${source}`, {
+    setPreviewLoading(true);
+    try {
+      const res = await fetch("/api/import/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source, content }),
+      });
+
+      if (!res.ok) {
+        onNotify({ tone: "error", message: "Preview failed." });
+        return;
+      }
+
+      const json = (await res.json()) as { data: { items: ImportPreviewItem[] } };
+      const items = json.data.items || [];
+
+      setPreviewSource(source);
+      setPreviewItems(items);
+      setSelectedIndices(items.map((item) => item.index));
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  async function runImport() {
+    if (!previewSource) {
+      onNotify({ tone: "error", message: "Select a source and preview items first." });
+      return;
+    }
+
+    if (selectedIndices.length === 0) {
+      onNotify({ tone: "error", message: "Select at least one series to import." });
+      return;
+    }
+
+    const content = previewSource === "mal" ? malContent : aniContent;
+    setImporting(true);
+
+    const res = await fetch(`/api/import/${previewSource}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, selectedIndices }),
     });
 
     if (!res.ok) {
-      alert("Import failed.");
+      onNotify({ tone: "error", message: "Import failed." });
+      setImporting(false);
       return;
     }
 
     const data = (await res.json()) as { data: { added: number; merged: number } };
-    alert(`Added: ${data.data.added}, merged: ${data.data.merged}`);
+    onNotify({ tone: "success", message: `Added: ${data.data.added}, merged: ${data.data.merged}` });
+    setImporting(false);
     onDone();
     onClose();
   }
@@ -692,21 +799,181 @@ function ImportModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
         <div className="space-y-5 p-6">
           <div className="space-y-2">
             <p className="text-xs text-gray-400">MAL XML</p>
+            <input
+              type="file"
+              accept=".xml,text/xml,application/xml"
+              onChange={(e) => void onFilePick("mal", e.target.files?.[0] || null)}
+              className="block w-full cursor-pointer rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-xs text-gray-300"
+            />
             <textarea rows={4} value={malContent} onChange={(e) => setMalContent(e.target.value)} placeholder="Paste MAL export XML here..." className={areaCls} />
-            <button onClick={() => void runImport("mal")} className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition-colors">
-              Import MAL
+            <button onClick={() => void runPreview("mal")} disabled={previewLoading} className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition-colors disabled:opacity-50">
+              {previewLoading && previewSource === "mal" ? "Loading..." : "Preview MAL"}
             </button>
           </div>
 
           <div className="h-px bg-gray-800" />
 
           <div className="space-y-2">
-            <p className="text-xs text-gray-400">AniList JSON</p>
-            <textarea rows={4} value={aniContent} onChange={(e) => setAniContent(e.target.value)} placeholder="Paste AniList export JSON here..." className={areaCls} />
-            <button onClick={() => void runImport("anilist")} className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition-colors">
-              Import AniList
+            <p className="text-xs text-gray-400">AniList JSON or XML</p>
+            <input
+              type="file"
+              accept=".json,.xml,application/json,text/xml,application/xml"
+              onChange={(e) => void onFilePick("anilist", e.target.files?.[0] || null)}
+              className="block w-full cursor-pointer rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-xs text-gray-300"
+            />
+            <textarea rows={4} value={aniContent} onChange={(e) => setAniContent(e.target.value)} placeholder="Paste AniList export JSON/XML here..." className={areaCls} />
+            <button onClick={() => void runPreview("anilist")} disabled={previewLoading} className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition-colors disabled:opacity-50">
+              {previewLoading && previewSource === "anilist" ? "Loading..." : "Preview AniList"}
             </button>
           </div>
+
+          {previewSource && (
+            <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950/40 p-4">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs text-gray-300">
+                  Select series to import ({selectedIndices.length}/{previewItems.length})
+                </p>
+                <div className="flex gap-2">
+                  <button onClick={selectAll} className="rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:text-white">
+                    Select all
+                  </button>
+                  <button onClick={clearSelection} className="rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:text-white">
+                    Clear
+                  </button>
+                </div>
+              </div>
+
+              <div className="max-h-56 overflow-y-auto rounded border border-gray-800">
+                {previewItems.map((item) => (
+                  <label key={`${previewSource}-${item.index}`} className="flex cursor-pointer items-center gap-2 border-b border-gray-800 px-3 py-2 text-xs text-gray-200 last:border-b-0">
+                    <input
+                      type="checkbox"
+                      checked={selectedIndices.includes(item.index)}
+                      onChange={() => toggleSelection(item.index)}
+                      className="accent-blue-500"
+                    />
+                    <span className="min-w-0 flex-1 truncate">{item.title}</span>
+                    <span className="shrink-0 text-gray-400">{item.status}</span>
+                    <span className="shrink-0 text-gray-500">{item.chaptersRead}/{item.totalChapters}</span>
+                  </label>
+                ))}
+              </div>
+
+              <button onClick={() => void runImport()} disabled={importing} className="w-full rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors">
+                {importing ? "Importing..." : "Import Selected"}
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function BackupsModal({ onClose }: { onClose: () => void }) {
+  const [items, setItems] = useState<BackupListItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function loadBackups() {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/backups");
+      if (!res.ok) throw new Error("Failed to load backups");
+      const json = (await res.json()) as { data: BackupListItem[] };
+      setItems(json.data || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load backups");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function createManualBackup() {
+    setCreating(true);
+    try {
+      const res = await fetch("/api/backups", { method: "POST" });
+      if (!res.ok) throw new Error("Backup creation failed");
+      await loadBackups();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Backup creation failed");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadBackups();
+  }, []);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm sm:items-center p-4">
+      <div className="w-full max-w-3xl rounded-xl bg-gray-900 border border-gray-800 shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between border-b border-gray-800 px-6 py-4">
+          <h2 className="text-base font-medium text-white">Backups</h2>
+          <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors" aria-label="Close backups modal">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="space-y-4 p-6">
+          <div className="flex justify-end">
+            <button
+              onClick={() => void createManualBackup()}
+              disabled={creating}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+            >
+              {creating ? "Creating..." : "Create Manual Backup"}
+            </button>
+          </div>
+
+          {error && <p className="text-sm text-red-400">{error}</p>}
+
+          {loading ? (
+            <p className="text-sm text-gray-400">Loading backups...</p>
+          ) : items.length === 0 ? (
+            <p className="text-sm text-gray-400">No backups found.</p>
+          ) : (
+            <div className="overflow-x-auto rounded-lg border border-gray-800">
+              <table className="min-w-full text-left text-sm text-gray-200">
+                <thead className="bg-gray-800/60 text-xs uppercase tracking-wide text-gray-400">
+                  <tr>
+                    <th className="px-3 py-2">Created</th>
+                    <th className="px-3 py-2">Reason</th>
+                    <th className="px-3 py-2">File</th>
+                    <th className="px-3 py-2">Size</th>
+                    <th className="px-3 py-2">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((item) => (
+                    <tr key={item.id} className="border-t border-gray-800">
+                      <td className="px-3 py-2">{new Date(item.createdAt).toLocaleString()}</td>
+                      <td className="px-3 py-2">{item.reason}</td>
+                      <td className="px-3 py-2 text-xs text-gray-300">{item.fileName}</td>
+                      <td className="px-3 py-2">{formatBytes(item.sizeBytes)}</td>
+                      <td className="px-3 py-2">
+                        <a
+                          href={`/api/backups/${item.id}/download`}
+                          className="inline-flex items-center rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
+                        >
+                          Download
+                        </a>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -722,6 +989,9 @@ export default function Home() {
   const [flagFilter, setFlagFilter] = useState<"none" | "reread" | "novel" | "follow">("none");
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [showBackups, setShowBackups] = useState(false);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
   async function fetchSeriesList(
     activeQuery: string,
@@ -797,21 +1067,16 @@ export default function Home() {
   }
 
   async function deleteOne(id: string) {
-    if (!confirm("Delete this series?")) return;
     await fetch(`/api/series/${id}`, { method: "DELETE" });
     await refresh();
-  }
-
-  async function triggerBackup() {
-    await fetch("/api/backups", { method: "POST" });
-    alert("Backup created.");
+    setNotice({ tone: "success", message: "Series deleted." });
   }
 
   async function exportMal() {
     const res = await fetch("/api/export/mal");
     const text = await res.text();
     await navigator.clipboard.writeText(text).catch(() => undefined);
-    alert("MAL XML exported and copied to clipboard.");
+    setNotice({ tone: "success", message: "MAL XML exported and copied to clipboard." });
   }
 
   const allTabs: Array<{ value: Status | "all"; label: string }> = [
@@ -830,6 +1095,15 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-linear-to-br from-gray-950 via-gray-900 to-gray-950 text-white">
       <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+        {notice && (
+          <div className={`mb-4 flex items-center justify-between rounded-lg border px-4 py-3 text-sm ${notice.tone === "error" ? "border-red-800 bg-red-950/40 text-red-200" : notice.tone === "success" ? "border-emerald-800 bg-emerald-950/40 text-emerald-200" : "border-blue-800 bg-blue-950/40 text-blue-200"}`}>
+            <span>{notice.message}</span>
+            <button onClick={() => setNotice(null)} className="text-gray-300 hover:text-white">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        )}
+
         <div className="mb-8 flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="mb-2 text-3xl font-medium sm:text-4xl">My Library</h1>
@@ -844,7 +1118,7 @@ export default function Home() {
               <Download className="h-4 w-4" />
               Export MAL
             </button>
-            <button onClick={() => void triggerBackup()} className={outlineBtn}>
+            <button onClick={() => setShowBackups(true)} className={outlineBtn}>
               <Shield className="h-4 w-4" />
               Backup
             </button>
@@ -919,15 +1193,41 @@ export default function Home() {
                 key={item.id}
                 item={item}
                 onChapter={(id, delta) => void changeChapter(id, delta)}
-                onDelete={(id) => void deleteOne(id)}
+                onDelete={(id) => setPendingDeleteId(id)}
               />
             ))}
           </div>
         )}
       </div>
 
-      {showAdd && <AddSeriesModal onClose={() => setShowAdd(false)} onAdded={() => void refresh()} />}
-      {showImport && <ImportModal onClose={() => setShowImport(false)} onDone={() => void refresh()} />}
+      {pendingDeleteId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-sm rounded-xl border border-gray-800 bg-gray-900 p-5">
+            <p className="text-sm text-gray-200">Delete this series?</p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button onClick={() => setPendingDeleteId(null)} className="rounded-lg border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:text-white">
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  const id = pendingDeleteId;
+                  setPendingDeleteId(null);
+                  if (id) {
+                    void deleteOne(id);
+                  }
+                }}
+                className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showAdd && <AddSeriesModal onClose={() => setShowAdd(false)} onAdded={() => void refresh()} onNotify={setNotice} />}
+      {showImport && <ImportModal onClose={() => setShowImport(false)} onDone={() => void refresh()} onNotify={setNotice} />}
+      {showBackups && <BackupsModal onClose={() => setShowBackups(false)} />}
     </div>
   );
 }

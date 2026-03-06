@@ -1,5 +1,6 @@
 export type SeriesStatus = "plan_to_read" | "reading" | "completed" | "dropped" | "up_to_date";
 export type SourceType = "TR" | "EN";
+export type PreferredSourceType = SourceType | "MAL" | "ANILIST";
 
 export interface SourceErrorInfo {
   message: string;
@@ -46,7 +47,7 @@ export interface Series {
   coverImageMimeType: string | null;
   coverImageFetchedAt: string | null;
   metadataFetchedAt: string | null;
-  preferredSourceType: SourceType | null;
+  preferredSourceType: PreferredSourceType | null;
   sources: SeriesSource[];
 }
 

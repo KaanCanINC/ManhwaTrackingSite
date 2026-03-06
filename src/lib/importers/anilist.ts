@@ -51,7 +51,7 @@ export function parseAnilistExport(content: string): ImportSeriesInput[] {
       reread: false,
       novelToRead: false,
       followUpdates: true,
-      preferredSourceType: null,
+      preferredSourceType: "ANILIST",
       coverImageBlob: null,
       coverImageMimeType: null,
       coverImageFetchedAt: null,

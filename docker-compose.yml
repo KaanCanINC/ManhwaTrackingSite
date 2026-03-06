@@ -2,12 +2,18 @@ services:
   manhwa-tracker:
     build: .
     container_name: manhwa-tracker
+    user: "${PUID:-1000}:${PGID:-1000}"
     ports:
       - "3000:3000"
     environment:
       - NODE_ENV=production
-      - DATA_DIR=/data
+      - DATA_DIR=${DATA_DIR:-/data}
+      - DB_DIR=${DB_DIR:-/data/database}
+      - BACKUPS_DIR=${BACKUPS_DIR:-/data/backups}
+      - IMPORTS_DIR=${IMPORTS_DIR:-/data/imports}
       - MAX_BACKUPS=60
     volumes:
-      - ./data:/data
+      - ${HOST_DB_DIR:-/var/lib/casaos/appdata/manhwa-tracker/database}:/data/database
+      - ${HOST_BACKUPS_DIR:-/var/lib/casaos/appdata/manhwa-tracker/backups}:/data/backups
+      - ${HOST_IMPORTS_DIR:-/var/lib/casaos/appdata/manhwa-tracker/imports}:/data/imports
     restart: unless-stopped

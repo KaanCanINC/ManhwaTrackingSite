@@ -31,3 +31,19 @@
 - Added manual source scrape endpoint for form workflows: `POST /api/scrape/website`.
 - Added per-source fetch buttons in add/edit forms (TR and EN independently).
 - Added preferred source selection for library display (`TR` or `EN`) and surfaced alternative titles under card/title.
+- Added backup browsing workflow in UI (open modal, list backups, create manual backup, download by id).
+- Expanded import modal to support file uploads (MAL XML + AniList JSON/XML).
+- Added AniList import endpoint XML fallback by reusing MAL XML parser.
+- Expanded MAL parser compatibility for official `manga_*` fields and stronger status normalization.
+- Switched library/detail cover rendering to `next/image` to remove plain-img warnings.
+- Started self-hosted storage realignment implementation:
+- Added directory-level storage overrides (`DB_DIR`, `BACKUPS_DIR`, `IMPORTS_DIR`) on top of `DATA_DIR`.
+- Updated docker compose to mount host-persistent per-folder paths instead of repo-local `./data`.
+- Updated runtime container to run as non-root (`node`) and keep storage envs explicit.
+- Replaced README with project-specific storage and migration documentation.
+- Removed browser-native alert/confirm usage from key flows and replaced with in-app styled notices/modals.
+- Added import preview-selection flow so users can choose exactly which entries are imported.
+- Added import preview API endpoint: `POST /api/import/preview`.
+- Added one-time metadata enrichment for MAL/AniList imports via provider APIs, including source URL/canonical metadata and optional cover fetch.
+- Extended preferred source model to include imported providers (`MAL`, `ANILIST`) for imported series.
+- Added focused `import-handler` unit tests for preview mapping, selected-index filtering, and MAL enrichment call sequencing.

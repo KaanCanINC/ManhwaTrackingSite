@@ -34,9 +34,30 @@
 - Added independent TR/EN metadata fetch actions in add/edit screens.
 - Added per-series preferred source choice for library card source behavior.
 - Added alternative title and tag extraction/presentation from scraper metadata.
+- Added backups listing API + backup download API (`/api/backups`, `/api/backups/[id]/download`).
+- Added backup management modal in dashboard (list, create, download).
+- Expanded import modal with file upload support for MAL XML and AniList JSON/XML.
+- Expanded AniList import route to detect and accept XML payloads.
+- Expanded MAL parser for official MAL `manga_*` field compatibility.
+- Updated detail page with manual TR/EN metadata fetch buttons and preferred source control.
+- Replaced plain image tags with `next/image` in key card/detail cover usage.
+- Added self-hosted storage path overrides in code (`DATA_DIR` + `DB_DIR`/`BACKUPS_DIR`/`IMPORTS_DIR`).
+- Updated Docker compose to use host-persistent directory mounts per data type (database/backups/imports).
+- Updated Docker runtime stage to non-root user execution for safer self-hosted deployment.
+- Replaced README boilerplate with project-specific storage model, compose usage, and migration guide.
+- Removed duplicate editable synopsis field from detail editor (kept single synopsis display + personal notes input).
+- Added import preview/selection step so MAL/AniList imports can be filtered by user before merge.
+- Added in-app notification pattern for key actions (import/add/export/delete) to avoid browser-native warnings.
+- Added imported-provider preferred source support (`MAL`, `ANILIST`) for imported series.
+- Added single-run metadata enrichment for MAL/AniList imports (title/description/chapters/source-url/cover best effort).
+- Added `import-handler` tests covering preview shape, selectedIndices filtering, and MAL enrichment path behavior.
 - Revalidated quality gates after metadata foundation changes (`npm run lint`, `npm run test`, `npm run build`).
 - Revalidated quality gates after website import wiring (`npm run lint`, `npm run test`, `npm run build`).
 - Revalidated quality gates after manual source scrape UX changes (`npm run lint`, `npm run test`, `npm run build`).
+- Revalidated quality gates after backup/import/detail parity updates (`npm run lint`, `npm run test -- --run`, `npm run build`).
+- Revalidated quality gates after self-hosted storage implementation start (`npm run lint`, `npm run build`).
+- Revalidated quality gates after import-selection/notification/preferred-source extension (`npm run lint`, `npm run test -- --run`, `npm run build`).
+- Revalidated quality gates after adding import-handler tests (`npm run test`, `npm run lint`).
 
 ## Remaining
 - Expand automated tests for backup rotation and repository edge cases.

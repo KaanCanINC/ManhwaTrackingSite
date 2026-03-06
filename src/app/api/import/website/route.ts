@@ -49,7 +49,7 @@ export async function POST(request: NextRequest) {
       importedAt: new Date().toISOString(),
     };
 
-    const result = runImport(
+    const result = await runImport(
       "website",
       JSON.stringify(artifact, null, 2),
       () => [scraped.importInput],

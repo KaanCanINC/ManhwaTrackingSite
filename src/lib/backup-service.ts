@@ -86,3 +86,57 @@ export function createChangeBackupIfCooledDown(): void {
   lastChangeBackupAt = now;
   createBackup("change");
 }
+
+export type BackupListItem = {
+  id: string;
+  fileName: string;
+  reason: string;
+  createdAt: string;
+  sizeBytes: number;
+};
+
+export function listBackups(): BackupListItem[] {
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT id, file_name, reason, created_at FROM backups ORDER BY created_at DESC")
+    .all() as Array<{ id: string; file_name: string; reason: string; created_at: string }>;
+
+  return rows.map((row) => {
+    const fullPath = path.join(dataPaths.backupsDir, row.file_name);
+    let sizeBytes = 0;
+    try {
+      sizeBytes = fs.statSync(fullPath).size;
+    } catch {
+      sizeBytes = 0;
+    }
+
+    return {
+      id: row.id,
+      fileName: row.file_name,
+      reason: row.reason,
+      createdAt: row.created_at,
+      sizeBytes,
+    };
+  });
+}
+
+export function getBackupFileById(id: string): { fileName: string; fullPath: string } | null {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT file_name FROM backups WHERE id = ? LIMIT 1")
+    .get(id) as { file_name: string } | undefined;
+
+  if (!row?.file_name) {
+    return null;
+  }
+
+  const fullPath = path.join(dataPaths.backupsDir, row.file_name);
+  if (!fs.existsSync(fullPath)) {
+    return null;
+  }
+
+  return {
+    fileName: row.file_name,
+    fullPath,
+  };
+}

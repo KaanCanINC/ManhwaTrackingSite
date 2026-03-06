@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { getDb } from "@/lib/db";
 import type {
+  PreferredSourceType,
   RereadSession,
   Series,
   SeriesFilters,
@@ -47,7 +48,7 @@ const baseSeriesSchema = z.object({
   rereadSessions: z.array(rereadSessionSchema).default([]),
   novelToRead: z.boolean().default(false),
   followUpdates: z.boolean().default(false),
-  preferredSourceType: z.enum(["TR", "EN"]).nullable().default(null),
+  preferredSourceType: z.enum(["TR", "EN", "MAL", "ANILIST"]).nullable().default(null),
   coverImageBlob: z.instanceof(Uint8Array).nullable().optional(),
   coverImageMimeType: z.string().trim().min(1).nullable().optional(),
   coverImageFetchedAt: z.string().datetime().nullable().optional(),
@@ -74,7 +75,7 @@ type SeriesRow = {
   reread_sessions: string;
   novel_to_read: number;
   follow_updates: number;
-  preferred_source_type: SourceType | null;
+  preferred_source_type: PreferredSourceType | null;
   cover_image_blob: Uint8Array | null;
   cover_image_mime_type: string | null;
   cover_image_fetched_at: string | null;

@@ -1,10 +1,13 @@
 import { XMLParser } from "fast-xml-parser";
-import type { SeriesStatus } from "@/lib/types";
+import type { PreferredSourceType, SeriesStatus } from "@/lib/types";
 
 interface MalAnime {
   series_title?: string;
   series_episodes?: string;
   my_watched_episodes?: string;
+  manga_title?: string;
+  manga_chapters?: string;
+  my_read_chapters?: string;
   my_start_date?: string;
   my_finish_date?: string;
   my_score?: string;
@@ -25,7 +28,7 @@ export interface ImportSeriesInput {
   reread: boolean;
   novelToRead: boolean;
   followUpdates: boolean;
-  preferredSourceType?: "TR" | "EN" | null;
+  preferredSourceType?: PreferredSourceType | null;
   coverImageBlob?: Uint8Array | null;
   coverImageMimeType?: string | null;
   coverImageFetchedAt?: string | null;
@@ -43,15 +46,31 @@ export interface ImportSeriesInput {
 }
 
 function toStatus(status?: string): SeriesStatus {
-  switch ((status || "").toLowerCase()) {
+  const normalized = (status || "").toLowerCase().replaceAll("_", " ").trim();
+  switch (normalized) {
     case "completed":
       return "completed";
+    case "dropped":
+      return "dropped";
+    case "on hold":
+      return "up_to_date";
+    case "plan to read":
+    case "plantoread":
+      return "plan_to_read";
     case "watching":
     case "reading":
       return "reading";
     default:
       return "plan_to_read";
   }
+}
+
+function toInt(raw: string | undefined): number {
+  const parsed = Number(raw || 0);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 0;
+  }
+  return Math.floor(parsed);
 }
 
 function toIsoDate(value?: string): string | null {
@@ -72,13 +91,13 @@ export function parseMalExport(content: string): ImportSeriesInput[] {
   const list = Array.isArray(raw) ? raw : [raw];
 
   return list
-    .filter((item) => item.series_title?.trim())
+    .filter((item) => (item.manga_title || item.series_title || "").trim())
     .map((item) => {
       const score = Number(item.my_score || 0);
       return {
-        title: String(item.series_title || "").trim(),
-        totalChapters: Number(item.series_episodes || 0),
-        chaptersRead: Number(item.my_watched_episodes || 0),
+        title: String(item.manga_title || item.series_title || "").trim(),
+        totalChapters: toInt(item.manga_chapters || item.series_episodes),
+        chaptersRead: toInt(item.my_read_chapters || item.my_watched_episodes),
         startDate: toIsoDate(item.my_start_date),
         finishDate: toIsoDate(item.my_finish_date),
         rating: score > 0 ? score : null,
@@ -88,7 +107,7 @@ export function parseMalExport(content: string): ImportSeriesInput[] {
         reread: false,
         novelToRead: false,
         followUpdates: true,
-        preferredSourceType: null,
+        preferredSourceType: "MAL",
         coverImageBlob: null,
         coverImageMimeType: null,
         coverImageFetchedAt: null,
