@@ -195,5 +195,102 @@ export function runMigrations(db: Database.Database): void {
     ).run(6, new Date().toISOString());
   }
 
+  if (version.version < 7) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS import_enrichment_jobs (
+        id TEXT PRIMARY KEY,
+        series_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_retry_at TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_import_enrichment_jobs_status_retry
+        ON import_enrichment_jobs(status, next_retry_at, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_import_enrichment_jobs_series_source
+        ON import_enrichment_jobs(series_id, source);
+    `);
+
+    db.prepare(
+      "INSERT INTO schema_migrations(version, executed_at) VALUES (?, ?)"
+    ).run(7, new Date().toISOString());
+  }
+
+  if (version.version < 8) {
+    const seriesColumns = db
+      .prepare("PRAGMA table_info(series)")
+      .all() as Array<{ name: string }>;
+    const seriesNames = new Set(seriesColumns.map((column) => column.name));
+
+    if (!seriesNames.has("metadata_source_url")) {
+      db.exec("ALTER TABLE series ADD COLUMN metadata_source_url TEXT;");
+    }
+    if (!seriesNames.has("metadata_source_site")) {
+      db.exec("ALTER TABLE series ADD COLUMN metadata_source_site TEXT;");
+    }
+    if (!seriesNames.has("metadata_source_canonical_id")) {
+      db.exec("ALTER TABLE series ADD COLUMN metadata_source_canonical_id TEXT;");
+    }
+    if (!seriesNames.has("metadata_source_updated_at")) {
+      db.exec("ALTER TABLE series ADD COLUMN metadata_source_updated_at TEXT;");
+    }
+
+    const providerRows = db
+      .prepare(
+        `SELECT series_id, site, canonical_id, url, scraped_at, created_at
+         FROM series_sources
+         WHERE site IN ('myanimelist', 'anilist')
+         ORDER BY created_at DESC`,
+      )
+      .all() as Array<{
+        series_id: string;
+        site: "myanimelist" | "anilist";
+        canonical_id: string | null;
+        url: string;
+        scraped_at: string | null;
+        created_at: string;
+      }>;
+
+    const seenSeries = new Set<string>();
+    const updateSeriesMetadata = db.prepare(
+      `UPDATE series
+       SET metadata_source_url = ?,
+           metadata_source_site = ?,
+           metadata_source_canonical_id = ?,
+           metadata_source_updated_at = ?
+       WHERE id = ?`,
+    );
+
+    const tx = db.transaction(() => {
+      for (const row of providerRows) {
+        if (seenSeries.has(row.series_id)) {
+          continue;
+        }
+        seenSeries.add(row.series_id);
+        updateSeriesMetadata.run(
+          row.url,
+          row.site,
+          row.canonical_id,
+          row.scraped_at ?? row.created_at,
+          row.series_id,
+        );
+      }
+
+      db.prepare("DELETE FROM series_sources WHERE site IN ('myanimelist', 'anilist')").run();
+    });
+
+    tx();
+
+    db.prepare(
+      "INSERT INTO schema_migrations(version, executed_at) VALUES (?, ?)"
+    ).run(8, new Date().toISOString());
+  }
+
   migrated = true;
 }

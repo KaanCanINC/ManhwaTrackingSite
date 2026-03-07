@@ -51,6 +51,36 @@
 - Added imported-provider preferred source support (`MAL`, `ANILIST`) for imported series.
 - Added single-run metadata enrichment for MAL/AniList imports (title/description/chapters/source-url/cover best effort).
 - Added `import-handler` tests covering preview shape, selectedIndices filtering, and MAL enrichment path behavior.
+- Hardened MAL/AniList enrichment with timeout + retry/backoff + paced low-concurrency request handling.
+- Added backup restore preview endpoint (`POST /api/backups/[id]/restore/preview`).
+- Added backup restore apply endpoint (`POST /api/backups/[id]/restore`) with explicit confirmation guard.
+- Added transactional full snapshot restore logic in backup service with automatic pre-restore safety backup.
+- Added restore controls and confirmation flow in Backups modal UI.
+- Reworked MAL/AniList import processing to enqueue metadata enrichment jobs after merge instead of inline enrichment.
+- Added `import_enrichment_jobs` migration (v7) with retry scheduling indexes.
+- Added in-process import enrichment queue worker (`src/lib/import-enrichment-queue.ts`).
+- Updated import API responses to include `queuedEnrichment` count.
+- Added pending enrichment badge on cards and periodic dashboard refresh while pending imported metadata exists.
+- Added enrichment stats endpoint (`GET /api/import/enrichment/stats`) with pending/running/failed/done counters.
+- Added retry-failed enrichment endpoint (`POST /api/import/enrichment/retry-failed`).
+- Added enrichment state fields into series list responses and dashboard enrichment filter tabs (`All`, `Enriching`, `Failed`).
+- Added dashboard action to retry failed enrichment jobs.
+- Added backup deletion endpoint (`DELETE /api/backups/[id]`) and delete action/confirmation in Backups modal.
+- Replaced backups table horizontal-scroll layout with responsive card rows to keep details/actions visible without x-scroll.
+- Added nickname-based import support for MAL and AniList (public profile fetch, preview, selective import, execute).
+- Added shared import-item path (`runImportFromItems`) for non-file import flows.
+- Added imported-series manual re-enrichment API (`POST /api/series/[id]/re-enrich`) and detail page action button.
+- Added adult-content enrichment policy: hentai hard-block fail, ecchi non-blocking warning.
+- Added MAL enrichment fallback to AniList when MAL returns no match.
+- Surfaced ecchi warning state in dashboard cards.
+- Added metadata source separation model in `series` (`metadata_source_url/site/canonical_id/updated_at`) and migration v8.
+- Added migration data transfer from provider rows in `series_sources` to metadata source fields; cleaned MAL/AniList rows from reading sources table.
+- Updated series repository create/update/map/merge paths for metadata source validation and persistence.
+- Updated detail page with `Metadata Source` input and detected-provider-driven preferred source options.
+- Updated preferred source resolver so MAL/AniList preferences resolve from metadata source, while TR/EN still resolve from reading sources.
+- Updated importer payloads to store MAL/AniList links in metadata source fields instead of injecting provider links into reading sources.
+- Added MAL note entity decoding (`&uuml;`, `&#252;`, etc.) during import parsing.
+- Added enrichment confidence scoring + candidate ranking + canonical-id-first fetch to reduce wrong-title metadata matches.
 - Revalidated quality gates after metadata foundation changes (`npm run lint`, `npm run test`, `npm run build`).
 - Revalidated quality gates after website import wiring (`npm run lint`, `npm run test`, `npm run build`).
 - Revalidated quality gates after manual source scrape UX changes (`npm run lint`, `npm run test`, `npm run build`).
@@ -58,6 +88,11 @@
 - Revalidated quality gates after self-hosted storage implementation start (`npm run lint`, `npm run build`).
 - Revalidated quality gates after import-selection/notification/preferred-source extension (`npm run lint`, `npm run test -- --run`, `npm run build`).
 - Revalidated quality gates after adding import-handler tests (`npm run test`, `npm run lint`).
+- Revalidated quality gates after enrichment hardening + backup restore implementation (`npm run lint`, `npm run test`, `npm run build`).
+- Revalidated quality gates after background enrichment queue implementation (`npm run lint`, `npm run test`, `npm run build`).
+- Revalidated quality gates after enrichment stats/retry filters + backup delete/layout updates (`npm run lint`, `npm run test`, `npm run build`).
+- Revalidated quality gates after nickname import + re-enrich + adult warning updates (`npm run lint`, `npm run test`, `npm run build`).
+- Revalidated quality gates after metadata-source separation + enrichment matching hardening (`npm run lint`, `npm run test`, `npm run build`).
 
 ## Remaining
 - Expand automated tests for backup rotation and repository edge cases.

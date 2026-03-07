@@ -2,8 +2,8 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { BookOpen, Download, Plus, RefreshCw, Shield, Star, Upload, X } from "lucide-react";
-import { FormEvent, MouseEvent, useEffect, useMemo, useState } from "react";
+import { ArrowUp, BookOpen, Download, LayoutGrid, List, Plus, RefreshCw, Shield, Star, Trash2, Upload, X } from "lucide-react";
+import { FormEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { PreferredSourceType, Series, SeriesStatus as Status, SourceType } from "@/lib/types";
 import {
   clampInt,
@@ -18,7 +18,7 @@ import {
   STATUS_OPTIONS,
   statusBg,
   todayStr,
-} from "@/lib/ui-utils";
+} from "@/utils/ui-utils";
 
 type ScrapeWebsiteResponse = {
   data: {
@@ -59,6 +59,24 @@ type BackupListItem = {
   reason: string;
   createdAt: string;
   sizeBytes: number;
+};
+
+type BackupRestorePreview = {
+  backupId: string;
+  backupFileName: string;
+  snapshotCreatedAt: string;
+  totalInBackup: number;
+  totalCurrent: number;
+  toAdd: number;
+  toUpdate: number;
+  toDelete: number;
+};
+
+type EnrichmentStats = {
+  pending: number;
+  running: number;
+  failed: number;
+  done: number;
 };
 
 type ImportPreviewItem = {
@@ -162,10 +180,15 @@ function MangaCard({
   onChapter: (id: string, delta: number) => void;
   onDelete: (id: string) => void;
 }) {
-  const preferredSource = getPreferredSource(item.sources, item.preferredSourceType);
+  const preferredSource = getPreferredSource(item.sources, item.preferredSourceType, {
+    url: item.metadataSourceUrl,
+    site: item.metadataSourceSite,
+    canonicalId: item.metadataSourceCanonicalId,
+  });
   const preferredMeta = parseSourceMeta(preferredSource);
   const progress =
     item.totalChapters > 0 ? Math.round((item.chaptersRead / item.totalChapters) * 100) : 0;
+  const isEnriching = item.enrichmentStatus === "pending" || item.enrichmentStatus === "running";
 
   function act(e: MouseEvent, fn: () => void) {
     e.preventDefault();
@@ -212,6 +235,13 @@ function MangaCard({
                 {formatStatus(item.status)}
               </span>
             </div>
+            {isEnriching && <p className="text-[10px] text-amber-300">Enriching metadata...</p>}
+            {item.enrichmentStatus === "failed" && (
+              <p className="text-[10px] text-red-300">Metadata failed. Use retry.</p>
+            )}
+            {item.enrichmentLastError === "ecchi_warning" && (
+              <p className="text-[10px] text-amber-200">Adult warning: ecchi content detected.</p>
+            )}
             <div className="space-y-1">
               <div className="flex items-center justify-between text-xs text-white/70">
                 <div className="flex items-center gap-1">
@@ -264,6 +294,116 @@ function MangaCard({
                 aria-label="Delete series"
               >
                 <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Link>
+  );
+}
+
+function MangaListRow({
+  item,
+  onChapter,
+  onDelete,
+}: {
+  item: Series;
+  onChapter: (id: string, delta: number) => void;
+  onDelete: (id: string) => void;
+}) {
+  const preferredSource = getPreferredSource(item.sources, item.preferredSourceType, {
+    url: item.metadataSourceUrl,
+    site: item.metadataSourceSite,
+    canonicalId: item.metadataSourceCanonicalId,
+  });
+  const progress = item.totalChapters > 0 ? Math.round((item.chaptersRead / item.totalChapters) * 100) : 0;
+  const isEnriching = item.enrichmentStatus === "pending" || item.enrichmentStatus === "running";
+
+  function act(e: MouseEvent, fn: () => void) {
+    e.preventDefault();
+    e.stopPropagation();
+    fn();
+  }
+
+  return (
+    <Link href={`/series/${item.id}`} className="block">
+      <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-3 transition-colors hover:border-gray-700">
+        <div className="flex gap-3">
+          <div className="relative h-28 w-20 shrink-0 overflow-hidden rounded-md" style={{ background: coverGradient(item.title) }}>
+            {item.hasCoverImage ? (
+              <Image
+                src={`/api/series/${item.id}/cover?u=${encodeURIComponent(item.updatedAt)}`}
+                alt={`${item.title} cover`}
+                fill
+                unoptimized
+                className="object-cover"
+              />
+            ) : (
+              <div className="flex h-full items-center justify-center text-xl font-bold text-white/20 select-none">
+                {item.title.slice(0, 2).toUpperCase()}
+              </div>
+            )}
+          </div>
+
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="truncate text-sm font-medium text-white">{item.title}</h3>
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium text-white ${statusBg(item.status)}`}>
+                {formatStatus(item.status)}
+              </span>
+            </div>
+
+            <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-gray-300">
+              <span>
+                {item.chaptersRead} / {item.totalChapters} ({progress}%)
+              </span>
+              <span className="inline-flex items-center gap-1 text-yellow-400">
+                <Star className="h-3.5 w-3.5 fill-current" />
+                {item.rating ?? "-"}
+              </span>
+            </div>
+
+            <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/15">
+              <div className="h-full bg-blue-500 transition-all" style={{ width: `${progress}%` }} />
+            </div>
+
+            {(isEnriching || item.enrichmentStatus === "failed" || item.enrichmentLastError === "ecchi_warning") && (
+              <div className="mt-2 space-y-0.5 text-[10px]">
+                {isEnriching && <p className="text-amber-300">Enriching metadata...</p>}
+                {item.enrichmentStatus === "failed" && <p className="text-red-300">Metadata failed. Use retry.</p>}
+                {item.enrichmentLastError === "ecchi_warning" && (
+                  <p className="text-amber-200">Adult warning: ecchi content detected.</p>
+                )}
+              </div>
+            )}
+
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              <button
+                onClick={(e) => act(e, () => onChapter(item.id, -1))}
+                className="rounded bg-white/15 px-2 py-0.5 text-xs text-white hover:bg-white/25"
+              >
+                -1
+              </button>
+              <button
+                onClick={(e) => act(e, () => onChapter(item.id, 1))}
+                className="rounded bg-blue-600/80 px-2 py-0.5 text-xs text-white hover:bg-blue-500"
+              >
+                +1
+              </button>
+              {preferredSource && (
+                <button
+                  onClick={(e) => act(e, () => window.open(preferredSource.url, "_blank", "noopener,noreferrer"))}
+                  className="rounded bg-orange-600/80 px-2 py-0.5 text-xs text-white hover:bg-orange-500"
+                >
+                  {preferredSource.type}
+                </button>
+              )}
+              <button
+                onClick={(e) => act(e, () => onDelete(item.id))}
+                className="rounded bg-red-700/70 px-2 py-0.5 text-xs text-white hover:bg-red-600"
+              >
+                Delete
               </button>
             </div>
           </div>
@@ -686,9 +826,14 @@ function ImportModal({
   onDone: () => void;
   onNotify: (notice: Notice) => void;
 }) {
+  const [selectedSource, setSelectedSource] = useState<"mal" | "anilist">("mal");
+  const [selectedMode, setSelectedMode] = useState<"content" | "nickname">("content");
   const [malContent, setMalContent] = useState("");
   const [aniContent, setAniContent] = useState("");
+  const [malNickname, setMalNickname] = useState("");
+  const [aniNickname, setAniNickname] = useState("");
   const [previewSource, setPreviewSource] = useState<"mal" | "anilist" | null>(null);
+  const [previewMode, setPreviewMode] = useState<"content" | "nickname">("content");
   const [previewItems, setPreviewItems] = useState<ImportPreviewItem[]>([]);
   const [selectedIndices, setSelectedIndices] = useState<number[]>([]);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -698,11 +843,23 @@ function ImportModal({
     return await file.text();
   }
 
-  async function onFilePick(source: "mal" | "anilist", file: File | null) {
+  async function onFilePick(file: File | null) {
     if (!file) return;
     const text = await readTextFile(file);
-    if (source === "mal") setMalContent(text);
+    if (selectedSource === "mal") setMalContent(text);
     else setAniContent(text);
+  }
+
+  function currentContent(): string {
+    return selectedSource === "mal" ? malContent : aniContent;
+  }
+
+  function currentNicknameValue(): string {
+    return selectedSource === "mal" ? malNickname : aniNickname;
+  }
+
+  function currentNicknameTrimmed(): string {
+    return currentNicknameValue().trim();
   }
 
   function toggleSelection(index: number) {
@@ -719,10 +876,36 @@ function ImportModal({
     setSelectedIndices([]);
   }
 
-  async function runPreview(source: "mal" | "anilist") {
-    const content = source === "mal" ? malContent : aniContent;
-    if (!content.trim()) {
+  function selectByStatus(group: "reading" | "plan_to_read" | "dropped" | "others") {
+    const groupStatuses =
+      group === "reading"
+        ? new Set(["reading"])
+        : group === "plan_to_read"
+          ? new Set(["plan_to_read"])
+          : group === "dropped"
+            ? new Set(["dropped"])
+            : new Set(["completed", "up_to_date"]);
+
+    const indices = previewItems
+      .filter((item) => groupStatuses.has(item.status))
+      .map((item) => item.index);
+
+    setSelectedIndices(indices);
+  }
+
+  async function runPreview() {
+    const source = selectedSource;
+    const mode = selectedMode;
+    const content = currentContent();
+    const nickname = currentNicknameTrimmed();
+
+    if (mode === "content" && !content.trim()) {
       onNotify({ tone: "error", message: "Import content is empty." });
+      return;
+    }
+
+    if (mode === "nickname" && !nickname) {
+      onNotify({ tone: "error", message: "Nickname is required." });
       return;
     }
 
@@ -731,7 +914,7 @@ function ImportModal({
       const res = await fetch("/api/import/preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source, content }),
+        body: JSON.stringify({ source, mode, content, nickname }),
       });
 
       if (!res.ok) {
@@ -743,6 +926,7 @@ function ImportModal({
       const items = json.data.items || [];
 
       setPreviewSource(source);
+      setPreviewMode(mode);
       setPreviewItems(items);
       setSelectedIndices(items.map((item) => item.index));
     } finally {
@@ -756,18 +940,27 @@ function ImportModal({
       return;
     }
 
+    if (previewSource !== selectedSource || previewMode !== selectedMode) {
+      onNotify({
+        tone: "error",
+        message: "Source or mode changed after preview. Run preview again before importing.",
+      });
+      return;
+    }
+
     if (selectedIndices.length === 0) {
       onNotify({ tone: "error", message: "Select at least one series to import." });
       return;
     }
 
-    const content = previewSource === "mal" ? malContent : aniContent;
+    const content = currentContent();
+    const nickname = currentNicknameTrimmed();
     setImporting(true);
 
     const res = await fetch(`/api/import/${previewSource}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content, selectedIndices }),
+      body: JSON.stringify({ mode: previewMode, content, nickname, selectedIndices }),
     });
 
     if (!res.ok) {
@@ -776,8 +969,13 @@ function ImportModal({
       return;
     }
 
-    const data = (await res.json()) as { data: { added: number; merged: number } };
-    onNotify({ tone: "success", message: `Added: ${data.data.added}, merged: ${data.data.merged}` });
+    const data = (await res.json()) as {
+      data: { added: number; merged: number; queuedEnrichment?: number };
+    };
+    onNotify({
+      tone: "success",
+      message: `Added: ${data.data.added}, merged: ${data.data.merged}. Enrichment queued: ${data.data.queuedEnrichment ?? 0}`,
+    });
     setImporting(false);
     onDone();
     onClose();
@@ -785,6 +983,8 @@ function ImportModal({
 
   const areaCls =
     "w-full resize-none rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none focus:border-blue-500 transition-colors";
+  const inputCls =
+    "w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none focus:border-blue-500 transition-colors";
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm sm:items-center p-4">
@@ -798,42 +998,99 @@ function ImportModal({
 
         <div className="space-y-5 p-6">
           <div className="space-y-2">
-            <p className="text-xs text-gray-400">MAL XML</p>
-            <input
-              type="file"
-              accept=".xml,text/xml,application/xml"
-              onChange={(e) => void onFilePick("mal", e.target.files?.[0] || null)}
-              className="block w-full cursor-pointer rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-xs text-gray-300"
-            />
-            <textarea rows={4} value={malContent} onChange={(e) => setMalContent(e.target.value)} placeholder="Paste MAL export XML here..." className={areaCls} />
-            <button onClick={() => void runPreview("mal")} disabled={previewLoading} className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition-colors disabled:opacity-50">
-              {previewLoading && previewSource === "mal" ? "Loading..." : "Preview MAL"}
-            </button>
+            <p className="text-xs text-gray-400">Source Platform</p>
+            <select
+              value={selectedSource}
+              onChange={(e) => setSelectedSource(e.target.value as "mal" | "anilist")}
+              className={inputCls}
+            >
+              <option value="mal">MyAnimeList</option>
+              <option value="anilist">AniList</option>
+            </select>
           </div>
-
-          <div className="h-px bg-gray-800" />
 
           <div className="space-y-2">
-            <p className="text-xs text-gray-400">AniList JSON or XML</p>
-            <input
-              type="file"
-              accept=".json,.xml,application/json,text/xml,application/xml"
-              onChange={(e) => void onFilePick("anilist", e.target.files?.[0] || null)}
-              className="block w-full cursor-pointer rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-xs text-gray-300"
-            />
-            <textarea rows={4} value={aniContent} onChange={(e) => setAniContent(e.target.value)} placeholder="Paste AniList export JSON/XML here..." className={areaCls} />
-            <button onClick={() => void runPreview("anilist")} disabled={previewLoading} className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition-colors disabled:opacity-50">
-              {previewLoading && previewSource === "anilist" ? "Loading..." : "Preview AniList"}
-            </button>
+            <p className="text-xs text-gray-400">Import Mode</p>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => setSelectedMode("content")}
+                className={`rounded-lg px-3 py-2 text-sm ${selectedMode === "content" ? "bg-blue-600 text-white" : "bg-gray-800 text-gray-300"}`}
+              >
+                File / Content
+              </button>
+              <button
+                onClick={() => setSelectedMode("nickname")}
+                className={`rounded-lg px-3 py-2 text-sm ${selectedMode === "nickname" ? "bg-cyan-700 text-white" : "bg-gray-800 text-gray-300"}`}
+              >
+                Nickname
+              </button>
+            </div>
           </div>
+
+          {selectedMode === "content" ? (
+            <div key={`content-${selectedSource}`} className="space-y-2">
+              <p className="text-xs text-gray-400">
+                {selectedSource === "mal" ? "MAL XML" : "AniList JSON or XML"}
+              </p>
+              <input
+                type="file"
+                accept={
+                  selectedSource === "mal"
+                    ? ".xml,text/xml,application/xml"
+                    : ".json,.xml,application/json,text/xml,application/xml"
+                }
+                onChange={(e) => void onFilePick(e.target.files?.[0] || null)}
+                className="block w-full cursor-pointer rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-xs text-gray-300"
+              />
+              <textarea
+                rows={5}
+                value={currentContent()}
+                onChange={(e) =>
+                  selectedSource === "mal" ? setMalContent(e.target.value) : setAniContent(e.target.value)
+                }
+                placeholder={
+                  selectedSource === "mal"
+                    ? "Paste MAL export XML here..."
+                    : "Paste AniList export JSON/XML here..."
+                }
+                className={areaCls}
+              />
+            </div>
+          ) : (
+            <div key={`nickname-${selectedSource}`} className="space-y-2 rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+              <p className="text-[11px] text-gray-400">
+                {selectedSource === "mal"
+                  ? "Import by public MAL nickname"
+                  : "Import by public AniList nickname"}
+              </p>
+              <input
+                value={currentNicknameValue()}
+                onChange={(e) =>
+                  selectedSource === "mal"
+                    ? setMalNickname(String(e.target.value || ""))
+                    : setAniNickname(String(e.target.value || ""))
+                }
+                placeholder={selectedSource === "mal" ? "MAL username" : "AniList username"}
+                className={inputCls}
+              />
+            </div>
+          )}
+
+          <button
+            onClick={() => void runPreview()}
+            disabled={previewLoading}
+            className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition-colors disabled:opacity-50"
+          >
+            {previewLoading ? "Loading..." : "Preview"}
+          </button>
 
           {previewSource && (
             <div className="space-y-3 rounded-lg border border-gray-800 bg-gray-950/40 p-4">
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-xs text-gray-300">
                   Select series to import ({selectedIndices.length}/{previewItems.length})
                 </p>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button onClick={selectAll} className="rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:text-white">
                     Select all
                   </button>
@@ -841,6 +1098,33 @@ function ImportModal({
                     Clear
                   </button>
                 </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2 rounded border border-gray-800 p-2">
+                <button
+                  onClick={() => selectByStatus("reading")}
+                  className="rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:text-white"
+                >
+                  Reading
+                </button>
+                <button
+                  onClick={() => selectByStatus("plan_to_read")}
+                  className="rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:text-white"
+                >
+                  Plan To Read
+                </button>
+                <button
+                  onClick={() => selectByStatus("dropped")}
+                  className="rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:text-white"
+                >
+                  Dropped
+                </button>
+                <button
+                  onClick={() => selectByStatus("others")}
+                  className="rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:text-white"
+                >
+                  Others
+                </button>
               </div>
 
               <div className="max-h-56 overflow-y-auto rounded border border-gray-800">
@@ -876,10 +1160,23 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-function BackupsModal({ onClose }: { onClose: () => void }) {
+function BackupsModal({
+  onClose,
+  onRestored,
+  onNotify,
+}: {
+  onClose: () => void;
+  onRestored: () => void;
+  onNotify: (notice: Notice) => void;
+}) {
   const [items, setItems] = useState<BackupListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [restorePreview, setRestorePreview] = useState<BackupRestorePreview | null>(null);
+  const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
+  const [restoring, setRestoring] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [pendingDeleteBackup, setPendingDeleteBackup] = useState<BackupListItem | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function loadBackups() {
@@ -907,6 +1204,84 @@ function BackupsModal({ onClose }: { onClose: () => void }) {
       setError(err instanceof Error ? err.message : "Backup creation failed");
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function openRestorePreview(backupId: string) {
+    setError(null);
+    setPreviewLoadingId(backupId);
+    try {
+      const res = await fetch(`/api/backups/${backupId}/restore/preview`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const err = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(err.error || "Failed to preview restore");
+      }
+      const json = (await res.json()) as { data: BackupRestorePreview };
+      setRestorePreview(json.data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to preview restore");
+    } finally {
+      setPreviewLoadingId(null);
+    }
+  }
+
+  async function applyRestore() {
+    if (!restorePreview) return;
+    setRestoring(true);
+    setError(null);
+
+    try {
+      const res = await fetch(`/api/backups/${restorePreview.backupId}/restore`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true }),
+      });
+
+      if (!res.ok) {
+        const err = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(err.error || "Restore failed");
+      }
+
+      const json = (await res.json()) as {
+        data: {
+          restoredSeries: number;
+          deletedSeries: number;
+          preRestoreBackupFileName: string;
+        };
+      };
+
+      onNotify({
+        tone: "success",
+        message: `Restore complete. Restored ${json.data.restoredSeries} series. Safety backup: ${json.data.preRestoreBackupFileName}`,
+      });
+      setRestorePreview(null);
+      await onRestored();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Restore failed");
+    } finally {
+      setRestoring(false);
+    }
+  }
+
+  async function deleteBackup(backup: BackupListItem) {
+    setDeletingId(backup.id);
+    setError(null);
+    try {
+      const res = await fetch(`/api/backups/${backup.id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const err = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(err.error || "Backup deletion failed");
+      }
+      onNotify({ tone: "success", message: `Backup deleted: ${backup.fileName}` });
+      setPendingDeleteBackup(null);
+      await loadBackups();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Backup deletion failed");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -942,51 +1317,143 @@ function BackupsModal({ onClose }: { onClose: () => void }) {
           ) : items.length === 0 ? (
             <p className="text-sm text-gray-400">No backups found.</p>
           ) : (
-            <div className="overflow-x-auto rounded-lg border border-gray-800">
-              <table className="min-w-full text-left text-sm text-gray-200">
-                <thead className="bg-gray-800/60 text-xs uppercase tracking-wide text-gray-400">
-                  <tr>
-                    <th className="px-3 py-2">Created</th>
-                    <th className="px-3 py-2">Reason</th>
-                    <th className="px-3 py-2">File</th>
-                    <th className="px-3 py-2">Size</th>
-                    <th className="px-3 py-2">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {items.map((item) => (
-                    <tr key={item.id} className="border-t border-gray-800">
-                      <td className="px-3 py-2">{new Date(item.createdAt).toLocaleString()}</td>
-                      <td className="px-3 py-2">{item.reason}</td>
-                      <td className="px-3 py-2 text-xs text-gray-300">{item.fileName}</td>
-                      <td className="px-3 py-2">{formatBytes(item.sizeBytes)}</td>
-                      <td className="px-3 py-2">
-                        <a
-                          href={`/api/backups/${item.id}/download`}
-                          className="inline-flex items-center rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
-                        >
-                          Download
-                        </a>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="space-y-3">
+              {items.map((item) => (
+                <div key={item.id} className="rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+                  <div className="grid gap-2 text-xs text-gray-300 md:grid-cols-[1.3fr,0.8fr,1.6fr,0.6fr]">
+                    <p className="min-w-0">
+                      <span className="text-gray-500">Created:</span>{" "}
+                      {new Date(item.createdAt).toLocaleString()}
+                    </p>
+                    <p className="min-w-0">
+                      <span className="text-gray-500">Reason:</span> {item.reason}
+                    </p>
+                    <p className="min-w-0 break-all">
+                      <span className="text-gray-500">File:</span> {item.fileName}
+                    </p>
+                    <p className="min-w-0">
+                      <span className="text-gray-500">Size:</span> {formatBytes(item.sizeBytes)}
+                    </p>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <a
+                      href={`/api/backups/${item.id}/download`}
+                      className="inline-flex items-center rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
+                    >
+                      Download
+                    </a>
+                    <button
+                      onClick={() => void openRestorePreview(item.id)}
+                      disabled={previewLoadingId === item.id || restoring || deletingId === item.id}
+                      className="inline-flex items-center rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-500 disabled:opacity-50"
+                    >
+                      {previewLoadingId === item.id ? "Previewing..." : "Restore"}
+                    </button>
+                    <button
+                      onClick={() => setPendingDeleteBackup(item)}
+                      disabled={restoring || deletingId === item.id}
+                      className="inline-flex items-center gap-1 rounded-lg bg-red-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-600 disabled:opacity-50"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>
       </div>
+
+      {restorePreview && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/75 p-4">
+          <div className="w-full max-w-md rounded-xl border border-gray-800 bg-gray-900 p-5">
+            <h3 className="text-sm font-semibold text-white">Restore Backup</h3>
+            <p className="mt-2 text-xs text-gray-300">
+              This will replace your current library with snapshot data.
+            </p>
+
+            <div className="mt-4 space-y-1 rounded-lg border border-gray-800 bg-gray-950/40 p-3 text-xs text-gray-300">
+              <p>Backup file: {restorePreview.backupFileName}</p>
+              <p>Snapshot date: {new Date(restorePreview.snapshotCreatedAt).toLocaleString()}</p>
+              <p>Will add: {restorePreview.toAdd}</p>
+              <p>Will update: {restorePreview.toUpdate}</p>
+              <p className="text-red-300">Will remove: {restorePreview.toDelete}</p>
+            </div>
+
+            <p className="mt-3 text-[11px] text-gray-400">
+              A safety backup is created automatically before restore.
+            </p>
+
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setRestorePreview(null)}
+                className="rounded-lg border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void applyRestore()}
+                disabled={restoring}
+                className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 disabled:opacity-50"
+              >
+                {restoring ? "Restoring..." : "Confirm Restore"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingDeleteBackup && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/75 p-4">
+          <div className="w-full max-w-md rounded-xl border border-gray-800 bg-gray-900 p-5">
+            <h3 className="text-sm font-semibold text-white">Delete Backup</h3>
+            <p className="mt-2 text-xs text-gray-300">
+              Delete <span className="font-medium text-white">{pendingDeleteBackup.fileName}</span> permanently?
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setPendingDeleteBackup(null)}
+                className="rounded-lg border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void deleteBackup(pendingDeleteBackup)}
+                disabled={deletingId === pendingDeleteBackup.id}
+                className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 disabled:opacity-50"
+              >
+                {deletingId === pendingDeleteBackup.id ? "Deleting..." : "Confirm Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 export default function Home() {
   const [items, setItems] = useState<Series[]>([]);
+  const itemsRef = useRef<Series[]>(items);
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
   const [statusCounts, setStatusCounts] = useState<Record<string, number>>({});
+  const [enrichmentStats, setEnrichmentStats] = useState<EnrichmentStats>({
+    pending: 0,
+    running: 0,
+    failed: 0,
+    done: 0,
+  });
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<Status | "all">("all");
+  const [enrichmentFilter, setEnrichmentFilter] = useState<"all" | "enriching" | "failed">("all");
   const [query, setQuery] = useState("");
   const [flagFilter, setFlagFilter] = useState<"none" | "reread" | "novel" | "follow">("none");
+  const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
+  const [showGoTop, setShowGoTop] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showBackups, setShowBackups] = useState(false);
@@ -1017,9 +1484,19 @@ export default function Home() {
   }
 
   async function refresh() {
-    const result = await fetchSeriesList(query, statusFilter, flagFilter);
+    const [result, statsRes] = await Promise.all([
+      fetchSeriesList(query, statusFilter, flagFilter),
+      fetch("/api/import/enrichment/stats"),
+    ]);
+
     setItems(result.items);
     setStatusCounts(result.statusCounts);
+
+    if (statsRes.ok) {
+      const json = (await statsRes.json()) as { data: EnrichmentStats };
+      setEnrichmentStats(json.data);
+    }
+
     setLoading(false);
   }
 
@@ -1027,10 +1504,17 @@ export default function Home() {
     let cancelled = false;
 
     void (async () => {
-      const result = await fetchSeriesList(query, statusFilter, flagFilter);
+      const [result, statsRes] = await Promise.all([
+        fetchSeriesList(query, statusFilter, flagFilter),
+        fetch("/api/import/enrichment/stats"),
+      ]);
       if (!cancelled) {
         setItems(result.items);
         setStatusCounts(result.statusCounts);
+        if (statsRes.ok) {
+          const json = (await statsRes.json()) as { data: EnrichmentStats };
+          setEnrichmentStats(json.data);
+        }
         setLoading(false);
       }
     })();
@@ -1039,6 +1523,70 @@ export default function Home() {
       cancelled = true;
     };
   }, [query, statusFilter, flagFilter]);
+
+  useEffect(() => {
+    const hasPendingEnrichment = itemsRef.current.some(
+      (item) => item.enrichmentStatus === "pending" || item.enrichmentStatus === "running",
+    );
+
+    if (!hasPendingEnrichment) {
+      return;
+    }
+
+    const id = setInterval(() => {
+      void (async () => {
+        const [result, statsRes] = await Promise.all([
+          fetchSeriesList(query, statusFilter, flagFilter),
+          fetch("/api/import/enrichment/stats"),
+        ]);
+        setItems(result.items);
+        setStatusCounts(result.statusCounts);
+        if (statsRes.ok) {
+          const json = (await statsRes.json()) as { data: EnrichmentStats };
+          setEnrichmentStats(json.data);
+        }
+      })();
+    }, 5000);
+
+    return () => clearInterval(id);
+  }, [query, statusFilter, flagFilter]);
+
+  useEffect(() => {
+    function onScroll() {
+      setShowGoTop(window.scrollY > 320);
+    }
+
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  async function retryFailedEnrichment() {
+    const res = await fetch("/api/import/enrichment/retry-failed", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limit: 300 }),
+    });
+
+    if (!res.ok) {
+      setNotice({ tone: "error", message: "Failed to retry enrichment jobs." });
+      return;
+    }
+
+    const json = (await res.json()) as { data: { retried: number } };
+    setNotice({ tone: "info", message: `Retried ${json.data.retried} failed enrichment jobs.` });
+    await refresh();
+  }
+
+  const visibleItems = useMemo(() => {
+    if (enrichmentFilter === "all") {
+      return items;
+    }
+    if (enrichmentFilter === "enriching") {
+      return items.filter((item) => item.enrichmentStatus === "pending" || item.enrichmentStatus === "running");
+    }
+    return items.filter((item) => item.enrichmentStatus === "failed");
+  }, [items, enrichmentFilter]);
 
   const summary = useMemo(
     () => ({
@@ -1165,31 +1713,94 @@ export default function Home() {
           </select>
         </div>
 
-        <div className="mb-6 flex flex-wrap gap-1 rounded-xl border border-gray-800 bg-gray-900/50 p-1 backdrop-blur">
-          {allTabs.map((tab) => (
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-800 bg-gray-900/50 p-2 backdrop-blur">
+          <div className="flex flex-1 flex-wrap gap-1">
+            {allTabs.map((tab) => (
+              <button
+                key={tab.value}
+                onClick={() => setStatusFilter(tab.value)}
+                className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+                  statusFilter === tab.value ? "bg-blue-600 text-white" : "text-gray-400 hover:text-white"
+                }`}
+              >
+                {tab.label} ({tabCount(tab.value)})
+              </button>
+            ))}
+          </div>
+
+          <div className="inline-flex overflow-hidden rounded-lg border border-gray-700">
             <button
-              key={tab.value}
-              onClick={() => setStatusFilter(tab.value)}
-              className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
-                statusFilter === tab.value ? "bg-blue-600 text-white" : "text-gray-400 hover:text-white"
-              }`}
+              onClick={() => setViewMode("grid")}
+              className={`inline-flex items-center gap-1 px-3 py-1.5 text-xs ${viewMode === "grid" ? "bg-blue-600 text-white" : "bg-gray-900 text-gray-300"}`}
             >
-              {tab.label} ({tabCount(tab.value)})
+              <LayoutGrid className="h-3.5 w-3.5" />
+              Grid
             </button>
-          ))}
+            <button
+              onClick={() => setViewMode("list")}
+              className={`inline-flex items-center gap-1 px-3 py-1.5 text-xs ${viewMode === "list" ? "bg-blue-600 text-white" : "bg-gray-900 text-gray-300"}`}
+            >
+              <List className="h-3.5 w-3.5" />
+              List
+            </button>
+          </div>
+        </div>
+
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-800 bg-gray-900/40 p-3">
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => setEnrichmentFilter("all")}
+              className={`rounded-lg px-3 py-1.5 text-xs ${enrichmentFilter === "all" ? "bg-blue-600 text-white" : "bg-gray-800 text-gray-300"}`}
+            >
+              All
+            </button>
+            <button
+              onClick={() => setEnrichmentFilter("enriching")}
+              className={`rounded-lg px-3 py-1.5 text-xs ${enrichmentFilter === "enriching" ? "bg-amber-600 text-white" : "bg-gray-800 text-gray-300"}`}
+            >
+              Enriching ({enrichmentStats.pending + enrichmentStats.running})
+            </button>
+            <button
+              onClick={() => setEnrichmentFilter("failed")}
+              className={`rounded-lg px-3 py-1.5 text-xs ${enrichmentFilter === "failed" ? "bg-red-600 text-white" : "bg-gray-800 text-gray-300"}`}
+            >
+              Failed ({enrichmentStats.failed})
+            </button>
+          </div>
+
+          <button
+            onClick={() => void retryFailedEnrichment()}
+            disabled={enrichmentStats.failed === 0}
+            className="inline-flex items-center gap-2 rounded-lg border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:text-white disabled:opacity-50"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            Retry failed enrichment
+          </button>
+
         </div>
 
         {loading ? (
           <div className="flex justify-center py-20 text-gray-400">Loading...</div>
-        ) : items.length === 0 ? (
+        ) : visibleItems.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-gray-500">
             <BookOpen className="mb-3 h-10 w-10" />
             <p>No series found for this filter.</p>
           </div>
-        ) : (
+        ) : viewMode === "grid" ? (
           <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {items.map((item) => (
+            {visibleItems.map((item) => (
               <MangaCard
+                key={item.id}
+                item={item}
+                onChapter={(id, delta) => void changeChapter(id, delta)}
+                onDelete={(id) => setPendingDeleteId(id)}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {visibleItems.map((item) => (
+              <MangaListRow
                 key={item.id}
                 item={item}
                 onChapter={(id, delta) => void changeChapter(id, delta)}
@@ -1227,7 +1838,25 @@ export default function Home() {
 
       {showAdd && <AddSeriesModal onClose={() => setShowAdd(false)} onAdded={() => void refresh()} onNotify={setNotice} />}
       {showImport && <ImportModal onClose={() => setShowImport(false)} onDone={() => void refresh()} onNotify={setNotice} />}
-      {showBackups && <BackupsModal onClose={() => setShowBackups(false)} />}
+      {showBackups && (
+        <BackupsModal
+          onClose={() => setShowBackups(false)}
+          onRestored={refresh}
+          onNotify={setNotice}
+        />
+      )}
+
+      {showGoTop && (
+        <button
+          type="button"
+          onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+          className="fixed right-4 bottom-4 z-40 rounded-full border border-gray-700 bg-gray-900/90 p-3 text-gray-200 shadow-lg transition-colors hover:border-blue-500 hover:text-white sm:right-6 sm:bottom-6"
+          aria-label="Go to top"
+          title="Go to top"
+        >
+          <ArrowUp className="h-5 w-5" />
+        </button>
+      )}
     </div>
   );
 }

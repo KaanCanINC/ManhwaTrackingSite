@@ -1,4 +1,10 @@
-import type { PreferredSourceType, RereadSession, SeriesSource, SeriesStatus } from "@/lib/types";
+import type {
+  MetadataSourceSite,
+  PreferredSourceType,
+  RereadSession,
+  SeriesSource,
+  SeriesStatus,
+} from "@/lib/types";
 
 export type { RereadSession };
 
@@ -76,13 +82,44 @@ export function statusBg(status: SeriesStatus): string {
 export function getPreferredSource(
   sources: SeriesSource[],
   preferredSourceType: PreferredSourceType | null,
+  metadataSource?: {
+    url: string | null;
+    site: MetadataSourceSite | null;
+    canonicalId: string | null;
+  },
 ): SeriesSource | null {
   if (preferredSourceType) {
     const match =
       preferredSourceType === "MAL"
-        ? sources.find((source) => source.site === "myanimelist")
+        ? metadataSource?.site === "myanimelist" && metadataSource.url
+          ? {
+              id: "metadata-mal",
+              seriesId: "metadata",
+              type: "EN" as const,
+              url: metadataSource.url,
+              site: "myanimelist",
+              canonicalId: metadataSource.canonicalId,
+              scrapedAt: null,
+              scraperName: "metadata-source",
+              lastError: null,
+              meta: null,
+            }
+          : null
         : preferredSourceType === "ANILIST"
-          ? sources.find((source) => source.site === "anilist")
+          ? metadataSource?.site === "anilist" && metadataSource.url
+            ? {
+                id: "metadata-anilist",
+                seriesId: "metadata",
+                type: "EN" as const,
+                url: metadataSource.url,
+                site: "anilist",
+                canonicalId: metadataSource.canonicalId,
+                scrapedAt: null,
+                scraperName: "metadata-source",
+                lastError: null,
+                meta: null,
+              }
+            : null
           : sources.find((source) => source.type === preferredSourceType);
     if (match) return match;
   }

@@ -1,6 +1,7 @@
 export type SeriesStatus = "plan_to_read" | "reading" | "completed" | "dropped" | "up_to_date";
 export type SourceType = "TR" | "EN";
 export type PreferredSourceType = SourceType | "MAL" | "ANILIST";
+export type MetadataSourceSite = "myanimelist" | "anilist";
 
 export interface SourceErrorInfo {
   message: string;
@@ -47,6 +48,12 @@ export interface Series {
   coverImageMimeType: string | null;
   coverImageFetchedAt: string | null;
   metadataFetchedAt: string | null;
+  metadataSourceUrl: string | null;
+  metadataSourceSite: MetadataSourceSite | null;
+  metadataSourceCanonicalId: string | null;
+  metadataSourceUpdatedAt: string | null;
+  enrichmentStatus?: "pending" | "running" | "failed" | null;
+  enrichmentLastError?: string | null;
   preferredSourceType: PreferredSourceType | null;
   sources: SeriesSource[];
 }

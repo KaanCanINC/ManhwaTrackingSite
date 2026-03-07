@@ -17,7 +17,7 @@ import {
   type RereadSessionForm,
   STATUS_OPTIONS,
   todayStr,
-} from "@/lib/ui-utils";
+} from "@/utils/ui-utils";
 
 type FormState = {
   title: string;
@@ -36,6 +36,7 @@ type FormState = {
   finishDate: string;
   trUrl: string;
   enUrl: string;
+  metadataSourceUrl: string;
   preferredSourceType: PreferredSourceType | null;
   coverImageBase64: string | null;
   coverImageMimeType: string | null;
@@ -102,6 +103,7 @@ function formFromSeries(series: Series): FormState {
     finishDate: series.finishDate ?? "",
     trUrl: trSrc?.url ?? "",
     enUrl: enSrc?.url ?? "",
+    metadataSourceUrl: series.metadataSourceUrl ?? "",
     preferredSourceType: series.preferredSourceType,
     coverImageBase64: null,
     coverImageMimeType: series.coverImageMimeType,
@@ -153,6 +155,8 @@ export default function SeriesDetailPage() {
   const [scrapingSource, setScrapingSource] = useState<SourceType | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [reEnriching, setReEnriching] = useState(false);
+  const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
@@ -167,7 +171,15 @@ export default function SeriesDetailPage() {
   const activePreferredSource = useMemo(() => {
     if (!series || !form) return null;
 
-    const existing = getPreferredSource(series.sources, form.preferredSourceType ?? series.preferredSourceType);
+    const existing = getPreferredSource(
+      series.sources,
+      form.preferredSourceType ?? series.preferredSourceType,
+      {
+        url: form.metadataSourceUrl || series.metadataSourceUrl,
+        site: series.metadataSourceSite,
+        canonicalId: series.metadataSourceCanonicalId,
+      },
+    );
     if (!existing) return null;
 
     const override = sourceMetaOverrides[existing.type];
@@ -181,6 +193,19 @@ export default function SeriesDetailPage() {
       meta: override?.meta ?? existing.meta,
     };
   }, [form, series, sourceMetaOverrides]);
+
+  const detectedMetadataSite = useMemo(() => {
+    const raw = form?.metadataSourceUrl?.trim();
+    if (!raw) return null;
+    try {
+      const host = new URL(raw).hostname.toLowerCase();
+      if (host === "myanimelist.net" || host.endsWith(".myanimelist.net")) return "myanimelist";
+      if (host === "anilist.co" || host.endsWith(".anilist.co")) return "anilist";
+    } catch {
+      return null;
+    }
+    return null;
+  }, [form?.metadataSourceUrl]);
 
   const preferredMeta = parseSourceMeta(activePreferredSource);
 
@@ -315,11 +340,18 @@ export default function SeriesDetailPage() {
     const sources = [trSource, enSource].filter(Boolean);
 
     const selectedPreferred = form.preferredSourceType;
+    const metadataSourceUrl = form.metadataSourceUrl.trim();
+    if (metadataSourceUrl && !detectedMetadataSite) {
+      setError("Metadata Source must be a valid AniList or MyAnimeList URL.");
+      setSaving(false);
+      return;
+    }
+
     const preferredExists = selectedPreferred
       ? selectedPreferred === "MAL"
-        ? sources.some((source) => source?.site === "myanimelist")
+        ? detectedMetadataSite === "myanimelist"
         : selectedPreferred === "ANILIST"
-          ? sources.some((source) => source?.site === "anilist")
+          ? detectedMetadataSite === "anilist"
           : sources.some((source) => source?.type === selectedPreferred)
       : false;
 
@@ -343,6 +375,9 @@ export default function SeriesDetailPage() {
           preferredSourceType: preferredExists ? selectedPreferred : null,
           startDate: form.startDate || null,
           finishDate: form.finishDate || null,
+          metadataSourceUrl: metadataSourceUrl || null,
+          metadataSourceSite: detectedMetadataSite,
+          metadataSourceUpdatedAt: metadataSourceUrl ? new Date().toISOString() : null,
           sources,
           coverImageBase64: form.coverImageBase64,
           coverImageMimeType: form.coverImageMimeType,
@@ -369,6 +404,33 @@ export default function SeriesDetailPage() {
     if (!series) return;
     await fetch(`/api/series/${series.id}`, { method: "DELETE" });
     router.push("/");
+  }
+
+  async function handleReEnrichImported() {
+    if (!series) return;
+
+    setReEnriching(true);
+    setError(null);
+    setFeedback(null);
+
+    try {
+      const res = await fetch(`/api/series/${series.id}/re-enrich`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "auto" }),
+      });
+
+      if (!res.ok) {
+        const err = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(err.error || "Re-fetch failed");
+      }
+
+      setFeedback("Metadata re-fetch queued. It will update in background.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Re-fetch failed");
+    } finally {
+      setReEnriching(false);
+    }
   }
 
   const inputCls =
@@ -468,6 +530,7 @@ export default function SeriesDetailPage() {
             <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-6 space-y-6">
               <h2 className="text-lg font-medium text-white">Tracking Details</h2>
               {error && <p className="text-sm text-red-400">{error}</p>}
+              {feedback && <p className="text-sm text-blue-300">{feedback}</p>}
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="sm:col-span-2">
@@ -536,8 +599,8 @@ export default function SeriesDetailPage() {
                     <option value="">Auto</option>
                     <option value="TR">TR</option>
                     <option value="EN">EN</option>
-                    {series.sources.some((source) => source.site === "myanimelist") && <option value="MAL">MyAnimeList</option>}
-                    {series.sources.some((source) => source.site === "anilist") && <option value="ANILIST">AniList</option>}
+                    {detectedMetadataSite === "myanimelist" && <option value="MAL">MyAnimeList</option>}
+                    {detectedMetadataSite === "anilist" && <option value="ANILIST">AniList</option>}
                   </select>
                 </div>
 
@@ -682,6 +745,38 @@ export default function SeriesDetailPage() {
                     </button>
                   </div>
                 </div>
+
+                <div className="mt-3 space-y-2">
+                  <label className={labelCls}>Metadata Source</label>
+                  <input
+                    value={form.metadataSourceUrl}
+                    onChange={(e) => f("metadataSourceUrl", e.target.value)}
+                    placeholder="https://myanimelist.net/manga/... or https://anilist.co/manga/..."
+                    className={inputCls}
+                  />
+                  {form.metadataSourceUrl.trim() && !detectedMetadataSite && (
+                    <p className="text-xs text-red-400">Only AniList and MyAnimeList URLs are supported.</p>
+                  )}
+                  {detectedMetadataSite && (
+                    <p className="text-xs text-blue-300">
+                      Detected metadata provider: {detectedMetadataSite === "myanimelist" ? "MyAnimeList" : "AniList"}
+                    </p>
+                  )}
+                </div>
+
+                {(detectedMetadataSite === "myanimelist" || detectedMetadataSite === "anilist") && (
+                  <div className="mt-3">
+                    <button
+                      type="button"
+                      disabled={reEnriching}
+                      onClick={() => void handleReEnrichImported()}
+                      className="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-500 disabled:opacity-50"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${reEnriching ? "animate-spin" : ""}`} />
+                      {reEnriching ? "Queueing..." : "Re-fetch Imported Metadata"}
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div>

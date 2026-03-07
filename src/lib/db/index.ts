@@ -1,7 +1,7 @@
 import path from "node:path";
 import Database from "better-sqlite3";
-import { ensureDataDirs, dataPaths } from "@/lib/storage";
-import { runMigrations } from "@/lib/migrations";
+import { ensureDataDirs, dataPaths } from "./storage";
+import { runMigrations } from "./migrations";
 
 let dbInstance: Database.Database | null = null;
 

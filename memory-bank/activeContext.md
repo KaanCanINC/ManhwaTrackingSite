@@ -47,3 +47,37 @@
 - Added one-time metadata enrichment for MAL/AniList imports via provider APIs, including source URL/canonical metadata and optional cover fetch.
 - Extended preferred source model to include imported providers (`MAL`, `ANILIST`) for imported series.
 - Added focused `import-handler` unit tests for preview mapping, selected-index filtering, and MAL enrichment call sequencing.
+- Hardened import enrichment network behavior with timeout, retry/backoff, and paced low-concurrency execution to reduce provider rate-limit failures.
+- Added backup restore backend flow with dry-run preview and apply endpoints:
+- `POST /api/backups/[id]/restore/preview`
+- `POST /api/backups/[id]/restore` (explicit confirm required)
+- Added transactional full-snapshot restore in backup service with automatic pre-restore safety backup creation.
+- Added restore UI flow to Backups modal (preview impact counts + explicit confirmation before apply).
+- Switched MAL/AniList import flow to immediate merge + background enrichment queue (no longer blocking import response on metadata fetch).
+- Added persistent enrichment jobs table via migration (`import_enrichment_jobs`) and in-process worker loop with retry scheduling.
+- Added queue enqueue wiring in import handler and included `queuedEnrichment` in MAL/AniList import API responses.
+- Added library card-level pending state label (`Enriching metadata...`) for imported MAL/AniList items without `metadataFetchedAt`.
+- Added short polling refresh in dashboard while pending imported metadata exists so cards update as queue completes.
+- Added queue management API endpoints:
+- `GET /api/import/enrichment/stats` for pending/running/failed/done counters.
+- `POST /api/import/enrichment/retry-failed` to requeue failed jobs.
+- Added enrichment status-aware dashboard filters (`All`, `Enriching`, `Failed`) and retry button in UI.
+- Added backup deletion API (`DELETE /api/backups/[id]`) and backup delete action in Backups modal.
+- Reworked Backups modal list layout to remove horizontal scroll requirement and keep all backup details/actions visible without x-scroll.
+- Added MAL/AniList public nickname import flow (preview + selective import + execute) alongside content/file import mode.
+- Added nickname normalization/validation guardrails to import preview and import execute routes.
+- Added imported-only manual re-enrichment endpoint (`POST /api/series/[id]/re-enrich`) and detail-page action button.
+- Added adult-content policy in enrichment queue:
+- `hentai` metadata blocked with failed job reason (`adult_hentai_blocked`).
+- `ecchi` metadata allowed with warning marker (`ecchi_warning`).
+- Added MAL miss fallback to AniList within enrichment processing.
+- Surfaced non-blocking ecchi warning in dashboard cards via enrichment warning state.
+- Started metadata-source separation rollout:
+- Added migration v8 with `series` columns: `metadata_source_url`, `metadata_source_site`, `metadata_source_canonical_id`, `metadata_source_updated_at`.
+- Migration now moves existing MAL/AniList rows out of `series_sources` into metadata-source columns and removes provider rows from reading-source table.
+- Updated repository schemas/mappers/create-update flows to persist and validate metadata source URLs (allowlist: AniList/MyAnimeList only).
+- Added detail page `Metadata Source` input and provider detection; preferred source dropdown now exposes MAL/AniList only when metadata source is detected.
+- Updated preferred source resolver to use dedicated metadata source URL for `MAL`/`ANILIST` selection, keeping reading sources limited to TR/EN.
+- Updated MAL/AniList importers to stop writing provider links into reading sources; provider links now populate metadata-source fields.
+- Added MAL notes HTML-entity decoding for import comments (`&uuml;` and numeric entities).
+- Added enrichment hardening with confidence scoring, multi-candidate selection, canonical-id-first lookups, and low-confidence skip reasons.

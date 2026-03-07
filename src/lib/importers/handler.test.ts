@@ -6,16 +6,19 @@ const mocks = vi.hoisted(() => {
   const runImportInsertMock = vi.fn();
   const prepareMock = vi.fn(() => ({ run: runImportInsertMock }));
   const getDbMock = vi.fn(() => ({ prepare: prepareMock }));
-  const enrichImportedItemsMock = vi.fn(
-    async (_source: "mal" | "anilist", items: ImportSeriesInput[]) => items,
-  );
+  const enqueueImportEnrichmentJobsMock = vi.fn(() => 0);
+  const mergeSeriesByTitleMock = vi.fn((item: ImportSeriesInput) => ({
+    type: "added" as const,
+    series: { id: `id-${item.title}` },
+  }));
 
   return {
     writeFileSyncMock,
     runImportInsertMock,
     prepareMock,
     getDbMock,
-    enrichImportedItemsMock,
+    enqueueImportEnrichmentJobsMock,
+    mergeSeriesByTitleMock,
   };
 });
 
@@ -29,25 +32,26 @@ vi.mock("@/lib/db", () => ({
   getDb: mocks.getDbMock,
 }));
 
-vi.mock("@/lib/storage", () => ({
+vi.mock("@/lib/db/storage", () => ({
   dataPaths: {
     importsDir: "/tmp/imports",
   },
 }));
 
-vi.mock("@/lib/import-metadata", () => ({
-  enrichImportedItems: mocks.enrichImportedItemsMock,
+vi.mock("@/lib/enrichment/queue", () => ({
+  enqueueImportEnrichmentJobs: mocks.enqueueImportEnrichmentJobsMock,
 }));
 
 vi.mock(
   "@/lib/series-repository",
   () => ({
     batchMergeSeriesByTitle: vi.fn(() => ({ added: 0, merged: 0 })),
+    mergeSeriesByTitle: mocks.mergeSeriesByTitleMock,
   }),
   { virtual: true },
 );
 
-import { getImportPreview, runImport } from "./import-handler";
+import { getImportPreview, runImport } from "./handler";
 
 function makeItem(title: string): ImportSeriesInput {
   return {
@@ -103,7 +107,7 @@ describe("import-handler", () => {
       selectedIndices: [0, 2],
     });
 
-    expect(mocks.enrichImportedItemsMock).not.toHaveBeenCalled();
+    expect(mocks.enqueueImportEnrichmentJobsMock).not.toHaveBeenCalled();
     expect(mergeStrategy).toHaveBeenCalledTimes(1);
     expect(mergeStrategy).toHaveBeenCalledWith([makeItem("A"), makeItem("C")]);
     expect(mocks.writeFileSyncMock).toHaveBeenCalledTimes(1);
@@ -112,18 +116,18 @@ describe("import-handler", () => {
     );
   });
 
-  it("applies selection first and then enriches MAL items", async () => {
+  it("applies selection first and then enqueues MAL enrichment jobs", async () => {
     const parser = () => [makeItem("A"), makeItem("B"), makeItem("C")];
-    const mergeStrategy = vi.fn(() => ({ added: 1, merged: 1 }));
+    mocks.enqueueImportEnrichmentJobsMock.mockReturnValueOnce(1);
 
-    mocks.enrichImportedItemsMock.mockResolvedValueOnce([makeItem("B")]);
-
-    await runImport("mal", "xml", parser, "xml", mergeStrategy, {
+    const result = await runImport("mal", "xml", parser, "xml", undefined, {
       selectedIndices: [1],
     });
 
-    expect(mocks.enrichImportedItemsMock).toHaveBeenCalledTimes(1);
-    expect(mocks.enrichImportedItemsMock).toHaveBeenCalledWith("mal", [makeItem("B")]);
-    expect(mergeStrategy).toHaveBeenCalledWith([makeItem("B")]);
+    expect(mocks.mergeSeriesByTitleMock).toHaveBeenCalledTimes(1);
+    expect(mocks.mergeSeriesByTitleMock).toHaveBeenCalledWith(makeItem("B"));
+    expect(mocks.enqueueImportEnrichmentJobsMock).toHaveBeenCalledTimes(1);
+    expect(mocks.enqueueImportEnrichmentJobsMock).toHaveBeenCalledWith("mal", ["id-B"]);
+    expect(result.queuedEnrichment).toBe(1);
   });
 });

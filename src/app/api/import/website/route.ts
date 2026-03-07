@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runImport } from "@/lib/import-handler";
+import { runImport } from "@/lib/importers/handler";
 import { batchMergeSeriesByCanonicalOrTitle } from "@/lib/series-repository";
 import { scrapeSeriesMetadata } from "@/lib/scrapers";
 

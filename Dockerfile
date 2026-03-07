@@ -17,15 +17,15 @@ ENV DB_DIR=/data/database
 ENV BACKUPS_DIR=/data/backups
 ENV IMPORTS_DIR=/data/imports
 ENV MAX_BACKUPS=60
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
 
 RUN mkdir -p /data/database /data/backups /data/imports && chown -R node:node /data
 
-COPY --from=builder /app/.next ./.next
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/package.json ./package.json
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/next.config.ts ./next.config.ts
+COPY --from=builder --chown=node:node /app/.next/standalone ./
+COPY --from=builder --chown=node:node /app/.next/static ./.next/static
+COPY --from=builder --chown=node:node /app/public ./public
 
 EXPOSE 3000
 USER node
-CMD ["npm", "run", "start"]
+CMD ["node", "server.js"]

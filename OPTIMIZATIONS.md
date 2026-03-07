@@ -1,26 +1,26 @@
-# Optimization Report
+# Optimization Audit — Manhwa Tracking Site
 
-**Date:** 2026-03-06  
-**Auditor:** GitHub Copilot (Claude Sonnet 4.6)  
-**Scope:** Full codebase — `src/lib/`, `src/app/api/`, `src/app/page.tsx`, `src/app/series/[id]/page.tsx`
+**Audit Date:** 2026-03-07  
+**Stack:** Next.js 16 (App Router) · React 19 · TypeScript · SQLite (better-sqlite3) · Tailwind CSS 4  
+**Scope:** Full codebase — backend, API routes, DB layer, enrichment queue, scraper, frontend  
 
 ---
 
 ## 1) Optimization Summary
 
 ### Current Health
-
-The codebase is well-structured for a personal-scale self-hosted app, but carries several high-impact inefficiencies that will noticeably degrade responsiveness even at modest library sizes (100–500 series). The single most damaging pattern is the N+1 query in `attachSources`, which multiplies DB round-trips linearly with library size on every list request. Combined with a "backup-on-every-mutation" policy, each `+1 chapter` button click triggers dozens of SQLite queries plus a synchronous full-library disk write.
+The codebase is in reasonable shape for a personal/single-user tool. Core correctness is solid — transactions are used, migrations are idempotent, Zod validates all inputs. The biggest category of pain is a single repeated pattern: **`SELECT *` pulling up-to-6 MB cover image BLOBs from SQLite on every read path**, including list queries, update operations, and backups. This compounds across polling, batch imports, and every backup creation.
 
 ### Top 3 Highest-Impact Improvements
 
-1. **Fix the N+1 query in `attachSources`** — single batched JOIN replaces N individual source lookups.  
-2. **Guard the daily backup check in memory** — avoid one DB query per GET request to `/api/series`.  
-3. **Deduplicate shared frontend code into a shared module** — eliminates type and logic drift across both pages.
+1. **Exclude `cover_image_blob` from all non-cover SELECT queries** — `listSeries`, `getSeriesById`, `updateSeries`, and backup creation all load the full BLOB into Node.js heap unnecessarily. One fix eliminates the largest memory pressure across the entire write path. _(Critical)_
 
-### Biggest Risk if No Changes Are Made
+2. **Eliminate the `updateSeries → getSeriesById` read-before-write** — Every PATCH to a series does a full SELECT (including blob) just to merge fields before the UPDATE. Replace with direct COALESCE-based UPDATE from request payload. _(High)_
 
-At ~300+ series the list page will noticeably lag (hundreds of milliseconds blocked on SQLite) due to the N+1 pattern. The "backup-on-change" flood will write dozens of full-library snapshots per minute during active reading sessions (e.g., bulk chapter updates), filling disk and dragging every mutation response.
+3. **Batch the `hasPendingLikeJob` check in `enqueueImportEnrichmentJobs`** — Currently issues one SELECT per series ID in a loop. For a 500-entry MAL import this is 500+ sequential DB queries in a hot path. Replace with a single `WHERE series_id IN (...)` query. _(Medium/High)_
+
+### Biggest Risk If Nothing Is Done
+Memory pressure from BLOB loading will grow proportionally with library size. A user with 500 entries × average 200 KB cover = ~100 MB heap churn per list request, per poll tick, and per backup. This will become noticeable on constrained VPS/container deployments (the stated deployment target in `docker-compose.yml`).
 
 ---
 
@@ -28,915 +28,720 @@ At ~300+ series the list page will noticeably lag (hundreds of milliseconds bloc
 
 ---
 
-### F-01: N+1 Query in `attachSources`
+### F-01 — `SELECT *` Loads cover_image_blob on Every List/Update Path
 
-- **Category:** DB / Algorithm
-- **Severity:** Critical
-- **Impact:** List-page latency, SQLite I/O, CPU
-- **Evidence:** [`src/lib/series-repository.ts` — `attachSources` + `getSources`](src/lib/series-repository.ts)
+- **Category:** DB / Memory  
+- **Severity:** Critical  
+- **Impact:** Eliminates large heap allocations per request; reduces SQLite I/O per query  
+- **Evidence:**  
+  - `src/lib/series-repository.ts` line 430: `"SELECT * FROM series"` in `listSeries`  
+  - `src/lib/series-repository.ts` line 443: `"SELECT * FROM series WHERE id = ?"` in `getSeriesById`  
+  - `src/lib/series-repository.ts` line 732: `"SELECT * FROM series WHERE LOWER(title) = LOWER(?)"` in `findSeriesByTitle`  
+  - `src/lib/series-repository.ts` line 748: `SET s.*` pull via LEFT JOIN in `findSeriesByCanonicalSource`  
+  - `src/lib/backup-service.ts` line 22: `listSeries({})` inside `createBackup` loads blobs into heap only to JSON-serialize objects that omit the blob  
+- **Why it's inefficient:** `cover_image_blob` can be up to 6 MB per row (enforced in `cover-image.ts`). Every `listSeries` call loads this full BLOB for every series into Node.js heap. `mapSeriesRow` immediately converts it to a boolean (`hasCoverImage`) and throws the buffer away, but the SQLite page cache and Node.js allocator still have to handle the raw data. With 200 series × 200 KB average = 40 MB of transient heap per request. `createBackup` calls `listSeries({})` and the snapshot JSON doesn't include the blob, so the entire allocation is pure waste.
+- **Recommended fix:** Replace all `SELECT *` list/find queries with an explicit column list that excludes `cover_image_blob`. The dedicated cover endpoint (`/api/series/[id]/cover` → `getSeriesCoverById`) already does a targeted `SELECT cover_image_blob, cover_image_mime_type` — that pattern is correct.
 
-```ts
-// Queries DB once per series row — O(N) queries for N series
-function attachSources(rows: SeriesRow[]): Series[] {
-  return rows.map((row) => {
-    const mapped = mapSeriesRow(row);
-    return { ...mapped, sources: getSources(mapped.id) }; // ← 1 SELECT per row
-  });
-}
-```
+  ```sql
+  -- Before
+  SELECT * FROM series WHERE ...
+  
+  -- After (exclude the BLOB column from list/lookup queries)
+  SELECT id, title, total_chapters, chapters_read, start_date, finish_date,
+         rating, description, personal_notes, status, reread, total_rereads,
+         reread_sessions, novel_to_read, follow_updates, preferred_source_type,
+         cover_image_mime_type, cover_image_fetched_at, metadata_fetched_at,
+         metadata_source_url, metadata_source_site, metadata_source_canonical_id,
+         metadata_source_updated_at, created_at, updated_at,
+         (cover_image_blob IS NOT NULL AND LENGTH(cover_image_blob) > 0) AS has_cover_image
+  FROM series WHERE ...
+  ```
 
-- **Why it's inefficient:** For 100 series, listing the library runs 101 SQLite statements: 1 to fetch series rows, then 1 per row to fetch sources. Each `prepare().all()` call creates a Statement object and issues a full round-trip to SQLite even though it's synchronous.
-- **Recommended fix:** Fetch all source rows in a single query with `IN (...)`, then group them in JavaScript by `series_id` before mapping.
+  Update `SeriesRow` type to swap `cover_image_blob: Uint8Array | null` for `has_cover_image: number`, and update `mapSeriesRow` accordingly.
 
-```ts
-function attachSourcesBatched(rows: SeriesRow[]): Series[] {
-  if (rows.length === 0) return [];
-  const db = getDb();
-  const ids = rows.map((r) => r.id);
-  const placeholders = ids.map(() => "?").join(", ");
-  const sourceRows = db
-    .prepare(`SELECT id, series_id, type, url FROM series_sources WHERE series_id IN (${placeholders})`)
-    .all(...ids) as Array<{ id: string; series_id: string; type: SourceType; url: string }>;
-
-  const bySeriesId = new Map<string, Series["sources"]>();
-  for (const s of sourceRows) {
-    const list = bySeriesId.get(s.series_id) ?? [];
-    list.push({ id: s.id, seriesId: s.series_id, type: s.type, url: s.url });
-    bySeriesId.set(s.series_id, list);
-  }
-
-  return rows.map((row) => ({
-    ...mapSeriesRow(row),
-    sources: bySeriesId.get(row.id) ?? [],
-  }));
-}
-```
-
-- **Tradeoffs / Risks:** Slightly more complex query construction. With very large IN lists (>999 items) SQLite has a variable limit; for a personal library this is not a realistic concern, but a `LIMIT 1000` on the top-level series query would keep it safe.
-- **Expected impact estimate:** **~80–95% reduction** in query count for list operations. For 200 series: 201 queries → 2 queries.
-- **Removal Safety:** Safe (equivalent results)
-- **Reuse Scope:** `series-repository.ts`
+- **Tradeoffs / Risks:** Requires updating the `SeriesRow` type and all callers of `mapSeriesRow`. The cover delivery endpoint is unaffected. Needs a migration-free schema change (just a query change). Low regression risk.
+- **Expected impact estimate:** 60–95% reduction in heap churn per list call depending on library size and average cover size. Most significant on backup creation.
+- **Removal Safety:** Safe (query-only change, no schema changes)
+- **Reuse Scope:** service-wide (`listSeries`, `getSeriesById`, `findSeriesByTitle`, `findSeriesByCanonicalSource`, backup creation)
 
 ---
 
-### F-02: Backup Created on Every Single Mutation
+### F-02 — `updateSeries` Reads Full Row (Including Blob) Before Every Write
 
-- **Category:** I/O / DB / Cost
-- **Severity:** High
-- **Impact:** Response latency, disk usage, filesystem I/O, SQLite load
-- **Evidence:** [`src/app/api/series/route.ts`](src/app/api/series/route.ts), [`src/app/api/series/[id]/route.ts`](src/app/api/series/%5Bid%5D/route.ts)
+- **Category:** DB / Memory  
+- **Severity:** High  
+- **Impact:** Eliminates a full SELECT (including BLOB load) before every PATCH operation  
+- **Evidence:** `src/lib/series-repository.ts` line 570 — `updateSeries` calls `getSeriesById(id)` to load `existing`, then merges fields from `input` onto `existing` before running an UPDATE. `getSeriesById` does `SELECT *` and also calls `getSources()` and `attachEnrichmentStates()`.
+- **Why it's inefficient:** The read-before-write pattern is used here to fill in unset optional fields (partial update semantics). This is correct behavior, but the implementation loads: the full BLOB (F-01 above), all sources (a second JOIN query), and enrichment states (a third query) — only to use the merged field values in an UPDATE. The BLOB load is particularly wasteful here since the final UPDATE ignores it except for `COALESCE(?, cover_image_blob)`.
+- **Recommended fix:**  
+  Option A (Minimal fix): Apply F-01 first; the BLOB load is eliminated but the extra SELECT+JOIN still happens.  
+  Option B (Full fix): Change the UPDATE to use `COALESCE` for every nullable field directly from the incoming payload, avoiding the pre-read entirely for most partial updates. Fall back to a targeted SELECT that excludes the BLOB for fields not in the payload.
 
-```ts
-// POST /api/series
-const created = createSeries(payload);
-createBackup("change"); // ← full library dump on every add
+  ```sql
+  UPDATE series SET
+    title = COALESCE(?, title),
+    cover_image_blob = COALESCE(?, cover_image_blob),
+    ...
+  WHERE id = ?
+  ```
 
-// PATCH /api/series/[id]  
-const updated = updateSeries(id, payload);
-createBackup("change"); // ← full library dump on every chapter +1/-1
-
-// DELETE /api/series/[id]
-deleteSeries(id);
-createBackup("change"); // ← full library dump on every delete
-```
-
-`createBackup` internally calls `listSeries({})` (which itself has the N+1 issue), `JSON.stringify(snapshot, null, 2)`, two `randomUUID()` calls, a `fs.writeFileSync`, a DB insert, and `rotateBackups()` (which does N `fs.statSync` calls). This runs on every `+1 chapter` click.
-
-- **Why it's inefficient:** A "change" backup is semantically meant to capture state before/after important mutations. Triggering it on every incremental chapter update floods the backup directory and makes every quick-action button on the card slow. With 60 backups rotating, a user doing 60 chapter increments will have deleted all pre-edit snapshots anyway.
-- **Recommended fix (two options):**
-  1. **Debounce/throttle** — only create a "change" backup if the last backup is older than N minutes (e.g., 15 minutes). Track last backup time in memory.
-  2. **Selective backup** — only backup on create/delete, not on PATCH (or only backup on PATCH when major fields like `status` change, not `chaptersRead`).
-
-```ts
-// Option 1: throttle in memory
-let lastChangedBackupAt = 0;
-const CHANGE_BACKUP_COOLDOWN_MS = 15 * 60 * 1000; // 15 min
-
-export function createChangeBackupIfNeeded(): void {
-  const now = Date.now();
-  if (now - lastChangedBackupAt < CHANGE_BACKUP_COOLDOWN_MS) return;
-  lastChangedBackupAt = now;
-  createBackup("change");
-}
-```
-
-- **Tradeoffs / Risks:** Slightly looser backup granularity. The daily backup already covers "last known state". A 15-minute cooldown still provides good coverage without flooding disk.
-- **Expected impact estimate:** **~90% reduction** in backup writes during active sessions. Saves full disk write + N+1 query chain on every mutation.
-- **Removal Safety:** Safe (more efficient, not less correct)
-- **Reuse Scope:** `backup-service.ts`, all three API mutation routes
+  Sources can be updated only when `input.sources` is explicitly provided.
+- **Tradeoffs / Risks:** Requires changing update semantics slightly; the current `merged = { ...existing, ...input }` approach is readable and safe. Full refactor increases complexity. Option A is the immediate win.
+- **Expected impact estimate:** 30–50% latency reduction per PATCH request when F-01 is also applied.
+- **Removal Safety:** Needs Verification (logic change)
+- **Reuse Scope:** module (series-repository)
 
 ---
 
-### F-03: `rotateBackups()` Issues `fs.statSync` Per File
-
-- **Category:** I/O
-- **Severity:** High
-- **Impact:** Backup creation latency, filesystem I/O
-- **Evidence:** [`src/lib/backup-service.ts` — `rotateBackups`](src/lib/backup-service.ts)
-
-```ts
-.map((file) => {
-  const fullPath = path.join(dataPaths.backupsDir, file);
-  return {
-    file,
-    fullPath,
-    mtimeMs: fs.statSync(fullPath).mtimeMs, // ← 1 syscall per backup file
-  };
-})
-```
-
-With MAX_BACKUPS=60, this does 60 `statSync` syscalls every time a backup is created, which is every mutation (see F-02).
-
-- **Why it's inefficient:** The backup filenames already embed an ISO 8601 timestamp (`backup-2026-03-06T09-56-27-614Z-*.json`). Lexicographic sort on filenames gives the same chronological order as mtime, without any syscalls.
-- **Recommended fix:**
-
-```ts
-function rotateBackups(): void {
-  const files = fs
-    .readdirSync(dataPaths.backupsDir)
-    .filter((f) => f.endsWith(".json"))
-    .sort()  // ISO timestamp prefix → lexicographic = chronological
-    .reverse();
-
-  const limit = maxBackups();
-  for (const file of files.slice(limit)) {
-    fs.unlinkSync(path.join(dataPaths.backupsDir, file));
-  }
-}
-```
-
-- **Tradeoffs / Risks:** Relies on filenames being consistently prefixed with `backup-<ISO>`. The current `createBackup` function always generates this pattern, so this is safe.
-- **Expected impact estimate:** Eliminates 60 `statSync` calls per backup — **100% reduction** in per-backup I/O overhead.
-- **Removal Safety:** Safe
-- **Reuse Scope:** `backup-service.ts`
-
----
-
-### F-04: Daily Backup Guard Queries DB on Every GET Request
-
-- **Category:** DB / Reliability
-- **Severity:** High
-- **Impact:** GET `/api/series` latency, unnecessary DB reads
-- **Evidence:** [`src/app/api/series/route.ts`](src/app/api/series/route.ts)
-
-```ts
-export async function GET(request: NextRequest) {
-  runDailyBackupIfNeeded(); // ← DB query on EVERY list request
-  ...
-}
-```
-
-`runDailyBackupIfNeeded` prepares and runs a SELECT against `backups` table on every call. The main page re-fetches on every user interaction (query change, flag filter change). This means every keystroke in the search box issues a backup check DB query.
-
-- **Why it's inefficient:** The "has today's backup been done?" check should be in-memory once per process day, not a DB query per HTTP request.
-- **Recommended fix:**
-
-```ts
-let dailyBackupCheckedDate = "";
-
-export function runDailyBackupIfNeeded(): { created: boolean; fileName?: string } {
-  const today = new Date().toISOString().slice(0, 10);
-  if (dailyBackupCheckedDate === today) return { created: false };
-
-  runMigrations();
-  const db = getDb();
-  const existing = db
-    .prepare(`SELECT id FROM backups WHERE reason = 'daily' AND substr(created_at, 1, 10) = ? LIMIT 1`)
-    .get(today) as { id: string } | undefined;
-
-  if (existing) {
-    dailyBackupCheckedDate = today;
-    return { created: false };
-  }
-
-  const backup = createBackup("daily");
-  dailyBackupCheckedDate = today;
-  return { created: true, fileName: backup.fileName };
-}
-```
-
-- **Tradeoffs / Risks:** In a multi-process environment the flag would be per-process. For this single-process local app, this is a strict improvement. If the process restarts mid-day, it will recheck the DB once (correct behavior).
-- **Expected impact estimate:** Eliminates 1 DB query per search keystroke. For a user typing a 5-character query, that's 5 avoided DB queries.
-- **Removal Safety:** Safe
-- **Reuse Scope:** `backup-service.ts`
-
----
-
-### F-05: Missing Database Indexes
-
-- **Category:** DB
-- **Severity:** High
-- **Impact:** Query latency as library grows, full-table scans
-- **Evidence:** [`src/lib/migrations.ts`](src/lib/migrations.ts) — no indexes defined
-
-The following queries run without covering indexes:
-
-| Query | Table | Missing Index |
-|---|---|---|
-| `WHERE series_id = ?` | `series_sources` | `(series_id)` |
-| `ORDER BY updated_at DESC` | `series` | `(updated_at DESC)` |
-| `WHERE reason = 'daily' AND substr(created_at, 1, 10) = ?` | `backups` | `(reason, created_at)` |
-| `WHERE LOWER(title) = LOWER(?)` | `series` | `(LOWER(title))` — expression index |
-| `LOWER(title) LIKE ?` | `series` | Cannot use index for leading-wildcard LIKE; document this |
-
-- **Why it's inefficient:** Without an index on `series_sources.series_id`, every `getSources` call scans the entire table. With 500 series averaging 2 sources each = 1000 rows scanned per lookup instead of a direct key lookup.
-- **Recommended fix:** Add a migration (version 3):
-
-```sql
--- Migration v3
-CREATE INDEX IF NOT EXISTS idx_series_sources_series_id ON series_sources(series_id);
-CREATE INDEX IF NOT EXISTS idx_series_updated_at ON series(updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_backups_reason_created_at ON backups(reason, created_at);
-CREATE INDEX IF NOT EXISTS idx_series_lower_title ON series(LOWER(title));
-```
-
-- **Tradeoffs / Risks:** Slightly slower writes (index maintenance), negligible at this scale. Index on `LOWER(title)` requires SQLite 3.8.9+ (ships with Node.js LTS, not a concern).
-- **Expected impact estimate:** `getSources` improves from O(N_sources) scan → O(1) lookup. `ORDER BY updated_at` avoids full sort. Daily backup check becomes an index seek.
-- **Removal Safety:** Safe
-- **Reuse Scope:** DB schema / `migrations.ts`
-
----
-
-### F-06: Status Filter Applied Client-Side While API Supports Server-Side Filtering
-
-- **Category:** Algorithm / Network / Frontend
-- **Severity:** High
-- **Impact:** Network payload size, frontend memory, filter latency
-- **Evidence:** [`src/app/page.tsx`](src/app/page.tsx)
-
-```ts
-// The effect only reacts to query and flagFilter — NOT statusFilter
-useEffect(() => {
-  ...fetchSeriesList(query, flagFilter)...
-}, [query, flagFilter]);  // statusFilter not here
-
-// Status filtering is done client-side in useMemo
-const visibleItems = useMemo(() => {
-  if (statusFilter === "all") return items;
-  return items.filter((item) => item.status === statusFilter); // ← JS filter on full list
-}, [items, statusFilter]);
-```
-
-The API already supports `?status=` but it is never used from the main page. The full library is always fetched and filtered in the browser.
-
-- **Why it's inefficient:** For a library of 500 series, switching to "Completed" tab fetches (and serializes/transmits) all 500, then filters to e.g. 120 in JS. The server could return only the 120. Additionally, summary counts become inaccurate when a flag filter is active (they reflect only the flag-filtered subset, not the full library).
-- **Recommended fix:** Either push `statusFilter` into the `useEffect` dependency and the API call, or (better for the tab UX) maintain a separate stats query. Since the tab counters need full-library counts, the cleanest fix is to always pass all filters including status to the server:
-
-```ts
-// include statusFilter in the effect deps and fetchSeriesList signature
-async function fetchSeriesList(
-  activeQuery: string,
-  activeStatus: Status | "all",
-  activeFlag: "none" | "reread" | "novel" | "follow"
-) {
-  const params = new URLSearchParams();
-  if (activeQuery.trim()) params.set("query", activeQuery.trim());
-  if (activeStatus !== "all") params.set("status", activeStatus);
-  if (activeFlag === "reread") params.set("reread", "true");
-  if (activeFlag === "novel") params.set("novelToRead", "true");
-  if (activeFlag === "follow") params.set("followUpdates", "true");
-  ...
-}
-
-useEffect(() => {
-  ...fetchSeriesList(query, statusFilter, flagFilter)...
-}, [query, statusFilter, flagFilter]);
-```
-
-Note: The tab `tabCount()` function currently uses `items.filter(...)` which relies on the full list being present. If you push status filtering server-side, tab counts should come from a separate `/api/series/counts` endpoint or use summary stats returned in the list response.
-
-- **Tradeoffs / Risks:** Requires separating summary stats from filtered results, which is slightly more work. Alternatively, keep client-side filtering but also push it to the server to reduce payload — both approaches reduce wasted work.
-- **Expected impact estimate:** **50–80% reduction** in response payload size when a status filter is active. Eliminates the full-list JS scan on every tab click.
-- **Removal Safety:** Needs Verification (requires coordinated frontend + API changes)
-- **Reuse Scope:** `page.tsx`, `api/series/route.ts`
-
----
-
-### F-07: `updateSeries` Fetches the Existing Record Then Fetches Again After Write
-
-- **Category:** DB
-- **Severity:** Medium
-- **Impact:** Extra DB round-trips on every update
-- **Evidence:** [`src/lib/series-repository.ts` — `updateSeries`](src/lib/series-repository.ts)
-
-```ts
-export function updateSeries(id: string, payload: unknown): Series | null {
-  ...
-  const existing = getSeriesById(id);   // ← fetch 1 (SELECT + getSources)
-  ...
-  tx();
-  return getSeriesById(id);             // ← fetch 2 (SELECT + getSources) after write
-}
-```
-
-`getSeriesById` itself calls `getSources`, so each call is 2 queries. `updateSeries` runs 4 queries before the actual UPDATE. `createSeries` has the same pattern — inserts then immediately fetches back.
-
-- **Why it's inefficient:** For `createSeries`, the inserted values are known — there's no need to re-query; just assemble the return value from `input` and `id`. For `updateSeries`, the merged value is also computed in memory (`merged`), so the return value can be constructed without a second SELECT.
-- **Recommended fix:** Construct the return `Series` from the in-memory `merged` + `id` + `now` instead of calling `getSeriesById` again. The existing record check can remain as-is (needed to verify existence).
-- **Tradeoffs / Risks:** If triggers or other DB-level logic modify the row after a write, the in-memory construction would diverge. For this schema with no triggers, it's safe.
-- **Expected impact estimate:** Removes 2 queries from every create/update path. Combined with F-01 fix, each mutation goes from ~4 queries → 2 queries.
-- **Removal Safety:** Safe (no triggers or computed columns in schema)
-- **Reuse Scope:** `series-repository.ts`
-
----
-
-### F-08: `runMigrations()` Called Redundantly on Every Repository Function
-
-- **Category:** Algorithm / Reliability
-- **Severity:** Medium
-- **Impact:** Redundant function call overhead, code noise
-- **Evidence:** Every exported function in `series-repository.ts` and `backup-service.ts`
-
-```ts
-export function listSeries(filters: SeriesFilters = {}): Series[] {
-  runMigrations(); // ← called here
-  ...
-}
-export function createSeries(payload: unknown): Series {
-  runMigrations(); // ← and here
-  ...
-}
-// backup-service.ts
-export function createBackup(reason: string) {
-  runMigrations(); // ← calls listSeries which also calls runMigrations
-  ...
-  const snapshot = { series: listSeries({}) }; // ← duplicate runMigrations call
-}
-```
-
-- **Why it's inefficient:** The module-level `migrated` flag in `migrations.ts` makes subsequent calls instant (just a boolean check), so this is low-overhead. However it's architecturally noisy—migrations should be run once at application startup in `db.ts` or in the first `getDb()` call, not scattered across every repository function.
-- **Recommended fix:** Call `runMigrations()` once inside `getDb()` on first initialization, and remove it from all repository functions.
-
-```ts
-// db.ts
-export function getDb(): Database.Database {
-  if (dbInstance) return dbInstance;
-  ensureDataDirs();
-  const dbPath = path.join(dataPaths.databaseDir, "tracker.sqlite");
-  dbInstance = new Database(dbPath);
-  dbInstance.pragma("journal_mode = WAL");
-  dbInstance.pragma("foreign_keys = ON");
-  runMigrations(); // ← single point of initialization
-  return dbInstance;
-}
-```
-
-Note: This introduces a circular import (`db.ts` → `migrations.ts` → `db.ts`). Resolve by either: (a) passing the `db` instance into `runMigrations`, or (b) calling migrations in `getDb` after checking `migrated` inline.
-
-- **Tradeoffs / Risks:** Requires refactoring the circular import. The current approach is safe but architecturally messy.
-- **Expected impact estimate:** No runtime improvement (guard is fast), but eliminates 8+ redundant function call stacks per request.
-- **Removal Safety:** Needs Verification (circular import resolution required)
-- **Reuse Scope:** `db.ts`, `series-repository.ts`, `backup-service.ts`
-
----
-
-### F-09: `ensureDataDirs()` Called on Every Backup and Export
-
-- **Category:** I/O
-- **Severity:** Medium
-- **Impact:** Unnecessary `mkdirSync` calls on hot paths
-- **Evidence:** [`src/lib/backup-service.ts`](src/lib/backup-service.ts), [`src/app/api/export/full/route.ts`](src/app/api/export/full/route.ts), [`src/app/api/export/mal/route.ts`](src/app/api/export/mal/route.ts)
-
-```ts
-export function createBackup(reason: string) {
-  runMigrations();
-  ensureDataDirs(); // ← 3x mkdirSync on every backup
-  ...
-}
-```
-
-- **Why it's inefficient:** `mkdirSync` with `{ recursive: true }` is a syscall that checks directory existence and creates if missing — three times per backup creation. Directories are created once at startup and rarely disappear.
-- **Recommended fix:** Call `ensureDataDirs()` once during `getDb()` / startup (already present there via `db.ts`). Remove subsequent calls from `createBackup` and export routes.
-- **Tradeoffs / Risks:** If a directory is accidentally removed while the process is running, the next backup/export will fail without auto-recovery. This is an acceptable tradeoff for a local app.
-- **Expected impact estimate:** Eliminates 3 `mkdirSync` syscalls per backup. Marginal but cumulative with other I/O savings.
-- **Removal Safety:** Likely Safe
-- **Reuse Scope:** `backup-service.ts`, export API routes
-
----
-
-### F-10: `changeChapter` Triggers Full List Re-fetch After Every Increment
-
-- **Category:** Network / Frontend
-- **Severity:** Medium
-- **Impact:** Unnecessary API round-trip, re-render cost
-- **Evidence:** [`src/app/page.tsx` — `changeChapter`](src/app/page.tsx)
-
-```ts
-async function changeChapter(id: string, delta: number) {
-  const item = items.find((i) => i.id === id);
-  if (!item) return;
-  const next = clampInt(item.chaptersRead + delta);
-  await fetch(`/api/series/${id}`, { method: "PATCH", ... });
-  await refresh(); // ← re-fetches entire library list
-}
-```
-
-- **Why it's inefficient:** After incrementing one chapter, the client fetches every series again. The PATCH response already contains the updated series object.
-- **Recommended fix:** Apply an optimistic (or response-based) update to local state instead of re-fetching:
-
-```ts
-async function changeChapter(id: string, delta: number) {
-  const item = items.find((i) => i.id === id);
-  if (!item) return;
-  const next = clampInt(item.chaptersRead + delta);
-  const res = await fetch(`/api/series/${id}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chaptersRead: next }),
-  });
-  if (res.ok) {
-    const json = (await res.json()) as { data: Series };
-    setItems((prev) => prev.map((i) => (i.id === id ? json.data : i)));
-  }
-}
-```
-
-- **Tradeoffs / Risks:** If the server mutates other fields (e.g., auto-status derived fields), the local update would be stale until next refresh. For the current schema, only `chaptersRead` and `updatedAt` change, so using the response body is safe.
-- **Expected impact estimate:** Eliminates one full-list GET per chapter increment. For rapid clicking, this is significant.
-- **Removal Safety:** Safe
-- **Reuse Scope:** `page.tsx`
-
----
-
-### F-11: `handleSave` in Detail Page Has No Error Handling
-
-- **Category:** Reliability
-- **Severity:** Medium
-- **Impact:** Silent data loss on network error or server validation failure
-- **Evidence:** [`src/app/series/[id]/page.tsx` — `handleSave`](src/app/series/%5Bid%5D/page.tsx)
-
-```ts
-async function handleSave() {
-  ...
-  await fetch(`/api/series/${series.id}`, { method: "PATCH", ... });
-  setSaving(false);
-  router.push("/"); // ← always navigates away, even if fetch failed
-}
-```
-
-- **Why it's inefficient/risky:** If the request fails (network error, 400 validation, 500 server error), the user is silently redirected home and their edits are lost with no indication of failure.
-- **Recommended fix:**
-
-```ts
-async function handleSave() {
-  if (!series || !form) return;
-  setSaving(true);
-  try {
-    const res = await fetch(`/api/series/${series.id}`, { method: "PATCH", ... });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      setError(`Save failed: ${JSON.stringify(err)}`);
-      return;
+### F-03 — Puppeteer Spawns a New Browser Process Per Scrape Request
+
+- **Category:** CPU / Reliability  
+- **Severity:** High  
+- **Impact:** Eliminates 0.5–3 s of browser startup on every blocked-domain scrape; reduces OS process overhead  
+- **Evidence:** `src/lib/scrapers/fetch-page.ts` — `fetchWithPuppeteer` calls `puppeteer.default.launch(...)` and `browser.close()` on every invocation. This is called as the fallback when HTTP returns a 403/429/503 or a Cloudflare response.
+- **Why it's inefficient:** Chromium browser startup is expensive (~0.5–2 s, ~100 MB RAM). Creating a disposable browser per request is the simplest pattern but the most costly. For a user adding or scraping multiple series in sequence, each call serializes a full launch/teardown cycle.
+- **Recommended fix:**  
+  Use a singleton browser with page-per-request and idle-timeout teardown:
+  
+  ```typescript
+  let sharedBrowser: Browser | null = null;
+  
+  async function getOrCreateBrowser(): Promise<Browser> {
+    if (!sharedBrowser || !sharedBrowser.connected) {
+      const puppeteer = await import("puppeteer");
+      sharedBrowser = await puppeteer.default.launch({
+        headless: true,
+        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      });
     }
-    router.push("/");
-  } catch {
-    setError("Network error — changes not saved.");
-  } finally {
-    setSaving(false);
+    return sharedBrowser;
   }
-}
-```
+  
+  async function fetchWithPuppeteer(url: string, timeoutMs: number) {
+    const browser = await getOrCreateBrowser();
+    const page = await browser.newPage();
+    try {
+      await page.setUserAgent("...");
+      await page.goto(url, { waitUntil: "networkidle2", timeout: timeoutMs });
+      const html = await page.content();
+      return { finalUrl: page.url(), html };
+    } finally {
+      await page.close(); // close page, not the browser
+    }
+  }
+  ```
+  
+  Add a `process.on("exit")` handler (or use `beforeExit`) to close the browser cleanly.
 
-- **Tradeoffs / Risks:** None — pure reliability improvement.
-- **Expected impact estimate:** Prevents silent data loss.
-- **Removal Safety:** Safe
-- **Reuse Scope:** `series/[id]/page.tsx`
-
----
-
-### F-12: Duplicated Type Definitions and Utility Functions Across Both Pages
-
-- **Category:** Maintainability / Dead Code / Reuse
-- **Severity:** Medium
-- **Impact:** Maintenance cost, bug surface area, bundle size
-- **Evidence:** [`src/app/page.tsx`](src/app/page.tsx) and [`src/app/series/[id]/page.tsx`](src/app/series/%5Bid%5D/page.tsx)
-
-The following are defined independently in both files:
-
-| Symbol | page.tsx | series/[id]/page.tsx |
-|---|---|---|
-| `Status` type | ✓ | ✓ |
-| `SourceType` type | ✓ | ✓ |
-| `RereadSession` type | ✓ | ✓ |
-| `Series` type | ✓ | ✓ |
-| `RereadSessionForm` type | ✓ | ✓ |
-| `RATING_OPTIONS` array | ✓ | ✓ |
-| `STATUS_OPTIONS` array | ✓ (with `bg`) | ✓ (without `bg`) |
-| `clampInt()` | ✓ | ✓ |
-| `normalizeRereadSessions()` | ✓ | ✓ |
-| `ensureSessionCount()` | ✓ | ✓ |
-| `todayStr()` | ✓ | ✓ |
-| `coverGradient()` | ✓ | ✓ |
-| `FormState` type | ✓ (with title) | ✓ (without title) |
-
-- **Why it's inefficient:** Any bug fix (e.g., `clampInt` edge case, `coverGradient` hash formula) must be applied in two places. Types already diverge slightly (`STATUS_OPTIONS` has `bg` in `page.tsx` but not in `series/[id]/page.tsx`). The `Series` frontend type duplicates `src/lib/types.ts` server types.
-- **Recommended fix:** Extract to `src/lib/ui-types.ts` (shared types) and `src/lib/ui-utils.ts` (shared utilities). Consider whether the frontend `Series` type can import/re-export from the server `types.ts` (it can in a Next.js app since both are TypeScript).
-- **Tradeoffs / Risks:** Reorganization effort. Requires verifying the slight divergence in `STATUS_OPTIONS` is intentional or a bug.
-- **Expected impact estimate:** Maintenance improvement; small bundle deduplication from tree-shaking.
-- **Removal Safety:** Needs Verification
-- **Reuse Scope:** Both client pages
+- **Tradeoffs / Risks:** Persistent browser holds ~100 MB RSS permanently. For a VPS deployment this is acceptable. Need to handle browser crashes (detect `!browser.connected` and re-launch). Concurrent requests to the same URL could open multiple pages — safe since `page.close()` is in a `finally` block.
+- **Expected impact estimate:** 80–95% latency reduction per Puppeteer-fallback scrape; meaningful for multi-step "scrape TR + scrape EN" workflows.
+- **Removal Safety:** Likely Safe
+- **Reuse Scope:** local file (scrapers/fetch-page.ts)
 
 ---
 
-### F-13: Import API Routes Are Near-Identical (Reuse Opportunity)
+### F-04 — `enqueueImportEnrichmentJobs` Has N+1 DB Queries
 
-- **Category:** Maintainability / Dead Code / Reuse
-- **Severity:** Medium
-- **Impact:** Maintenance cost, future divergence risk
-- **Evidence:** [`src/app/api/import/mal/route.ts`](src/app/api/import/mal/route.ts) and [`src/app/api/import/anilist/route.ts`](src/app/api/import/anilist/route.ts)
-
-Both routes are ~50 lines of identical logic: parse body, validate, save to disk, loop `mergeSeriesByTitle`, insert into `imports` table, return counts. The only differences are the parser function and the `source` string.
-
-- **Why it's inefficient:** Any shared logic changes (e.g., adding error wrapping, changing the import table schema) must be duplicated. A bug in one is likely present in both.
-- **Recommended fix:** Extract a shared `runImport(source: string, content: string, parser: (c: string) => ImportSeriesInput[])` function in a shared module (e.g., `src/lib/import-handler.ts`), then each route becomes a 5-line wrapper.
-- **Tradeoffs / Risks:** Minor refactor, purely upside.
-- **Expected impact estimate:** Cuts 40+ lines of duplicated code; single point of truth for import logic.
-- **Removal Safety:** Safe
-- **Reuse Scope:** Both import API routes
-
----
-
-### F-14: Export Routes Write Files to Disk on Every Request Without Cleanup
-
-- **Category:** I/O / Cost
-- **Severity:** Low
-- **Impact:** Disk accumulation over time
-- **Evidence:** [`src/app/api/export/full/route.ts`](src/app/api/export/full/route.ts), [`src/app/api/export/mal/route.ts`](src/app/api/export/mal/route.ts)
-
-```ts
-const fileName = `full-export-${Date.now()}.json`;
-const outputPath = path.join(dataPaths.importsDir, fileName);
-fs.writeFileSync(outputPath, JSON.stringify(payload, null, 2), "utf8");
-```
-
-Every export click writes a timestamped file to `data/imports/` with no rotation or cleanup. Over time (especially if a user exports frequently), this directory fills up.
-
-- **Why it's inefficient:** The full export writes a pretty-printed JSON to disk and then transmits the same data in the HTTP response body. The disk copy is redundant unless it serves an audit trail purpose. The MAL export correctly streams the file in the response body, but also writes to disk unnecessarily.
-- **Recommended fix:** Either (a) remove the disk write from exports (the HTTP response is the deliverable), or (b) apply the same rotation logic from `rotateBackups` to export files (keep last N). If disk persistence is desired for audit purposes, document this intention.
-- **Tradeoffs / Risks:** If the disk file is intended as a "last known export" artifact, removal would change behavior. But no code reads these files back, so they appear to be unused artifacts.
-- **Expected impact estimate:** Prevents unbounded export file accumulation.
-- **Removal Safety:** Likely Safe (no reader code found)
-- **Reuse Scope:** Both export routes
-
----
-
-### F-15: `JSON.stringify(snapshot, null, 2)` in Backups Wastes Disk and CPU
-
-- **Category:** I/O / Memory
-- **Severity:** Low
-- **Impact:** Backup file size, serialization time
-- **Evidence:** [`src/lib/backup-service.ts`](src/lib/backup-service.ts)
-
-```ts
-fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2), "utf8");
-```
-
-The `null, 2` argument produces human-readable but larger JSON (~30–50% larger than compact JSON). Backups are machine-generated files, not designed to be hand-edited.
-
-- **Why it's inefficient:** For 500 series with sources and reread sessions, a pretty-printed backup might be 500 KB vs. 350 KB compact. Multiplied by 60 backups in rotation = 9 MB vs. 6 MB. Also, V8's `JSON.stringify` with indentation is measurably slower.
-- **Recommended fix:** Use `JSON.stringify(snapshot)` (no indentation). If human readability is desired, document it as intentional.
-- **Tradeoffs / Risks:** Backup files become harder to read manually. Functionally identical on import.
-- **Expected impact estimate:** ~30% smaller backup files; faster serialization.
-- **Removal Safety:** Safe
-- **Reuse Scope:** `backup-service.ts`
-
----
-
-### F-16: No `busy_timeout` Set on SQLite Connection
-
-- **Category:** Reliability
-- **Severity:** Low
-- **Impact:** Occasional SQLITE_BUSY errors under concurrent access
-- **Evidence:** [`src/lib/db.ts`](src/lib/db.ts)
-
-```ts
-dbInstance.pragma("journal_mode = WAL");
-dbInstance.pragma("foreign_keys = ON");
-// missing: dbInstance.pragma("busy_timeout = 5000");
-```
-
-- **Why it's inefficient:** Without `busy_timeout`, SQLite returns `SQLITE_BUSY` immediately when a write lock is held by another connection (e.g., SQLite CLI, Docker volume mount, another process). WAL mode reduces this risk but doesn't eliminate it.
+- **Category:** DB / Algorithm  
+- **Severity:** Medium/High  
+- **Impact:** Reduces a batch of 500 import enqueue calls from ~500 SELECT queries to 1  
+- **Evidence:** `src/lib/import-enrichment-queue.ts` lines 74–83 — for each `seriesId` in the input array, calls `hasPendingLikeJob(seriesId, source)` (one SELECT) then optionally `enqueueJob(seriesId, source)` (one SELECT + one INSERT inside `enqueueJob`). With `import-handler.ts` calling this after a 500-entry MAL import, this is a tight loop of DB queries.
+- **Why it's inefficient:** `hasPendingLikeJob` fires `SELECT id FROM import_enrichment_jobs WHERE series_id = ? AND source = ? AND status IN (...) LIMIT 1` for each ID individually. SQLite handles this quickly due to the composite index `idx_import_enrichment_jobs_series_source`, but the round-trip overhead (statement prep, execution, result fetch) for 500 separate calls is still measurably slower than a single batched query.
 - **Recommended fix:**
-
-```ts
-dbInstance.pragma("busy_timeout = 5000"); // wait up to 5s before failing
-```
-
-- **Tradeoffs / Risks:** Requests may hang for up to 5 seconds under extreme lock contention. For a single-process local app, this is almost never triggered.
-- **Expected impact estimate:** Prevents rare but hard-to-debug SQLITE_BUSY crashes.
+  ```typescript
+  export function enqueueImportEnrichmentJobs(source: ImportSource, seriesIds: string[]): number {
+    if (seriesIds.length === 0) return 0;
+    const db = getDb();
+    const uniqueIds = [...new Set(seriesIds)];
+    const placeholders = uniqueIds.map(() => "?").join(", ");
+    
+    // Find which IDs already have a pending/running job
+    const existingRows = db
+      .prepare(
+        `SELECT series_id FROM import_enrichment_jobs
+         WHERE series_id IN (${placeholders}) AND source = ? AND status IN ('pending', 'running')`
+      )
+      .all(...uniqueIds, source) as Array<{ series_id: string }>;
+    
+    const alreadyQueued = new Set(existingRows.map(r => r.series_id));
+    const toQueue = uniqueIds.filter(id => !alreadyQueued.has(id));
+    
+    if (toQueue.length === 0) {
+      startEnrichmentWorker();
+      return 0;
+    }
+    
+    const now = nowIso();
+    const insert = db.prepare(
+      `INSERT INTO import_enrichment_jobs
+       (id, series_id, source, status, attempts, next_retry_at, last_error, created_at, updated_at)
+       VALUES (?, ?, ?, 'pending', 0, ?, NULL, ?, ?)`
+    );
+    const batchInsert = db.transaction(() => {
+      for (const id of toQueue) {
+        insert.run(randomUUID(), id, source, now, now, now);
+      }
+    });
+    batchInsert();
+    startEnrichmentWorker();
+    return toQueue.length;
+  }
+  ```
+- **Tradeoffs / Risks:** Slightly more complex. The `IN (...)` placeholder approach with spread `...uniqueIds` is fine for `better-sqlite3` and safe for typical import sizes (≤1000). For very large imports (>999 on some SQLite builds), split into chunks of 500.
+- **Expected impact estimate:** ~500x fewer queries for a typical MAL import; measurable as request latency (100–800 ms reduction on a slow disk).
 - **Removal Safety:** Safe
-- **Reuse Scope:** `db.ts`
+- **Reuse Scope:** local file (import-enrichment-queue.ts)
 
 ---
 
-### F-17: `mergeSeriesByTitle` Has `findSeriesByTitle` + `updateSeries` Pattern That Repeats `getSeriesById`
+### F-05 — Dashboard Enrichment Polling Causes `useEffect` Interval Churn
 
-- **Category:** DB / Algorithm
-- **Severity:** Low
-- **Impact:** Extra DB queries during bulk import
-- **Evidence:** [`src/lib/series-repository.ts` — `mergeSeriesByTitle`](src/lib/series-repository.ts)
+- **Category:** Frontend / Concurrency  
+- **Severity:** Medium  
+- **Impact:** Eliminates redundant interval teardown/setup on every poll tick; prevents potential poll acceleration  
+- **Evidence:** `src/app/page.tsx` line 1523 — the polling `useEffect` depends on `[items, query, statusFilter, flagFilter]`. Every time a poll resolves and `setItems(result.items)` is called, `items` changes, which re-runs the effect: the interval is `clearInterval`'d, a new `hasPendingEnrichment` check runs, and a new `setInterval` is created. This means the 5-second interval restarts from zero after each fire.
+- **Why it's inefficient:** This is a correctness bug as much as an efficiency issue. The intent is "while any item is enriching, poll every 5s." The current pattern drifts the interval on each resolution, causing polling to always restart the timer rather than fire on a fixed cadence. For rapid state updates this could cause polling to be delayed indefinitely ("interval livelock").
+- **Recommended fix:**
+  ```typescript
+  // Use a ref to read current items without re-running the effect
+  const itemsRef = useRef(items);
+  useEffect(() => { itemsRef.current = items; }, [items]);
+  
+  // Polling effect depends only on filters (not items)
+  useEffect(() => {
+    const id = setInterval(() => {
+      const hasPending = itemsRef.current.some(
+        item => item.enrichmentStatus === "pending" || item.enrichmentStatus === "running"
+      );
+      if (!hasPending) {
+        clearInterval(id);
+        return;
+      }
+      void (async () => {
+        const [result, statsRes] = await Promise.all([
+          fetchSeriesList(query, statusFilter, flagFilter),
+          fetch("/api/import/enrichment/stats"),
+        ]);
+        setItems(result.items);
+        setStatusCounts(result.statusCounts);
+        if (statsRes.ok) {
+          const json = (await statsRes.json()) as { data: EnrichmentStats };
+          setEnrichmentStats(json.data);
+        }
+      })();
+    }, 5000);
+    
+    return () => clearInterval(id);
+  }, [query, statusFilter, flagFilter]);
+  ```
+- **Tradeoffs / Risks:** Requires adding a `itemsRef`. The self-canceling pattern (`clearInterval(id)` inside the callback) stops polling when no items are pending without relying on effect re-runs.
+- **Expected impact estimate:** Fixes interval restart bug; negligible direct perf gain but prevents subtle timing regression.
+- **Removal Safety:** Likely Safe
+- **Reuse Scope:** local file (app/page.tsx)
 
-```ts
-export function mergeSeriesByTitle(payload: unknown) {
-  const existing = findSeriesByTitle(parsed.title); // SELECT + getSources (2 queries)
-  if (!existing) {
-    return { type: "added", series: createSeries(parsed) }; // INSERT + SELECT + getSources (3 queries)
+---
+
+### F-06 — `listSeries` + `getStatusCounts` Run Separately with Identical WHERE Clauses
+
+- **Category:** DB  
+- **Severity:** Medium  
+- **Impact:** Eliminates one redundant DB round-trip per GET /api/series call  
+- **Evidence:** `src/app/api/series/route.ts` lines 33–41 — `GET` calls both `listSeries(filters)` and `getStatusCounts(filters)` with identical filter objects. Each compiles its own WHERE clause and runs it independently.
+- **Why it's inefficient:** Two sequential `db.prepare().all()` calls hit the same `series` table with the same predicate. SQLite's page cache means the second query mostly hits cache, but statement compilation, row iteration, and function-call overhead are duplicated.
+- **Recommended fix:**  
+  Use a single query with conditional count via `SUM(CASE WHEN status = 'x' THEN 1 ELSE 0 END)` appended to the list query, or have `listSeries` return status counts as a side-effect. Alternatively, combine with a CTE:
+  ```sql
+  WITH filtered AS (
+    SELECT * FROM series WHERE <filters>
+  )
+  SELECT * FROM filtered
+  UNION ALL
+  SELECT NULL, status, COUNT(*) AS count FROM filtered GROUP BY status
+  ```
+  A simpler approach: have `listSeries` accept an option to return counts alongside data and make a single repository call.
+- **Tradeoffs / Risks:** Couples the list and count queries — acceptable since they're always called together at this endpoint. If status counts are needed elsewhere independently, keep `getStatusCounts` but don't call both separately here.
+- **Expected impact estimate:** Saves ~1 DB query per page load; low absolute value but clean.
+- **Removal Safety:** Safe
+- **Reuse Scope:** module (series-repository + series/route.ts)
+
+---
+
+### F-07 — Title Search Uses `LOWER(title) LIKE '%q%'` (Leading Wildcard, No Index Benefit)
+
+- **Category:** DB / Algorithm  
+- **Severity:** Medium  
+- **Impact:** Proper FTS would reduce title-search latency from O(N) scan to O(log N) or O(result)  
+- **Evidence:** `src/lib/series-repository.ts` lines 403–404 — `LOWER(title) LIKE ?` where `params.push('%query%')`. The `idx_series_lower_title` index exists but cannot be used for `LIKE '%x%'` patterns (leading wildcard forces full scan). The `idx_series_updated_at` index will also be skipped once a WHERE clause is added.
+- **Why it's inefficient:** SQLite must read every row in the `series` table and apply `LOWER()` + `LIKE` to each one. At small library sizes (< 1000 rows) this isn't noticeable. At scale or when combined with backup/restore operations it adds latency.
+- **Recommended fix:**  
+  Use SQLite FTS5:
+  ```sql
+  -- In a migration:
+  CREATE VIRTUAL TABLE IF NOT EXISTS series_fts
+    USING fts5(title, content='series', content_rowid='rowid');
+  
+  -- Triggers to keep it in sync:
+  CREATE TRIGGER series_ai AFTER INSERT ON series BEGIN
+    INSERT INTO series_fts(rowid, title) VALUES (new.rowid, new.title);
+  END;
+  CREATE TRIGGER series_au AFTER UPDATE OF title ON series BEGIN
+    INSERT INTO series_fts(series_fts, rowid, title) VALUES ('delete', old.rowid, old.title);
+    INSERT INTO series_fts(rowid, title) VALUES (new.rowid, new.title);
+  END;
+  CREATE TRIGGER series_ad AFTER DELETE ON series BEGIN
+    INSERT INTO series_fts(series_fts, rowid, title) VALUES ('delete', old.rowid, old.title);
+  END;
+  
+  -- Query:
+  SELECT s.* FROM series s
+  JOIN series_fts ON series_fts.rowid = s.rowid
+  WHERE series_fts MATCH ?
+  ```
+  For a personal tracker, this is a "nice to have" rather than urgent.
+- **Tradeoffs / Risks:** FTS5 triggers add a small overhead to writes. The virtual table takes additional space. The MATCH query has different tokenization semantics than LIKE. For non-ASCII/CJK titles the built-in FTS tokenizer may need configuration.
+- **Expected impact estimate:** 10–50x faster title search at >500 entries.
+- **Removal Safety:** Needs Verification (semantic change in search behavior)
+- **Reuse Scope:** module (series-repository + migrations)
+
+---
+
+### F-08 — `updateSeries` Always Deletes + Reinserts All Sources
+
+- **Category:** DB  
+- **Severity:** Medium  
+- **Impact:** Eliminates unnecessary DELETE + N×INSERT on every series update when sources are unchanged  
+- **Evidence:** `src/lib/series-repository.ts` lines 667–683 — inside every `updateSeries` transaction, `DELETE FROM series_sources WHERE series_id = ?` is run unconditionally, then all sources (including unchanged ones) are re-inserted with new UUIDs.
+- **Why it's inefficient:** Every chapter-count bump, status change, or note edit triggers a delete-all + reinsert-all for sources, even when sources were not part of the PATCH payload. This generates unnecessary write WAL entries and invalidates the source UUID IDs on every update.
+- **Recommended fix:**  
+  Only update sources when `input.sources` is explicitly provided in the incoming payload:
+  ```typescript
+  if (input.sources !== undefined) {
+    db.prepare("DELETE FROM series_sources WHERE series_id = ?").run(id);
+    for (const src of sourceEntries) {
+      db.prepare(`INSERT INTO series_sources ...`).run(...);
+    }
   }
-  const updated = updateSeries(existing.id, nextPayload); // SELECT + getSources + UPDATE + SELECT + getSources (5 queries)
-  ...
-}
-```
+  ```
+  The `updateSeriesSchema` uses `.partial()` so `input.sources` being `undefined` is a valid "not provided" signal.
+- **Tradeoffs / Risks:** Requires distinguishing "sources not in payload" from "sources intentionally set to empty array." A sentinel check `input.sources !== undefined` is clear and unambiguous.
+- **Expected impact estimate:** Eliminates 1 DELETE + N INSERT per non-source update (e.g., every chapter +1 click from the dashboard).
+- **Removal Safety:** Likely Safe
+- **Reuse Scope:** local file (series-repository.ts)
 
-For a 500-item MAL import, this runs the N+1 pattern 500 times. Each `mergeSeriesByTitle` alone can be 7 queries in the update branch.
+---
 
-- **Why it's inefficient:** Bulk imports are prime candidates for batch operations. All title lookups could be done in one `IN` query upfront, then creates/updates could be batched into a single transaction.
-- **Recommended fix:** For large imports, add a batch variant of `mergeSeriesByTitle` that pre-fetches all existing titles in one query and wraps all inserts/updates in a single transaction.
-- **Tradeoffs / Risks:** More complex implementation. For typical MAL imports (100–500 items) the current approach takes a second or two but is not catastrophic.
-- **Expected impact estimate:** For 300-item import: ~2100 queries → ~3 queries + 300 individual writes in one transaction. Import time drops from potential multi-second to sub-100ms.
+### F-09 — `findSeriesByCanonicalSource` Uses LEFT JOIN + OR (Potential Index Miss)
+
+- **Category:** DB  
+- **Severity:** Medium  
+- **Impact:** Faster canonical-source lookup during imports  
+- **Evidence:** `src/lib/series-repository.ts` lines 748–760 — query uses `LEFT JOIN series_sources ON ... WHERE (ss.site = ? AND ss.canonical_id = ?) OR (s.metadata_source_site = ? AND s.metadata_source_canonical_id = ?)`. SQLite's query planner may not pick both `idx_series_sources_site_canonical` and the direct column lookup optimally when they're OR'd together across a join boundary.
+- **Why it's inefficient:** SQLite can struggle to use multiple indexes for OR predicates spanning different tables in the same query. One branch of the OR may cause a full scan of `series_sources`.
+- **Recommended fix:**  
+  Replace with a UNION of two targeted queries:
+  ```sql
+  SELECT s.* FROM series s
+  JOIN series_sources ss ON ss.series_id = s.id
+  WHERE ss.site = ? AND ss.canonical_id = ?
+  ORDER BY s.updated_at DESC LIMIT 1
+  
+  UNION
+  
+  SELECT * FROM series
+  WHERE metadata_source_site = ? AND metadata_source_canonical_id = ?
+  ORDER BY updated_at DESC LIMIT 1
+  ```
+  Execute both and return the first non-null result.
+- **Tradeoffs / Risks:** Two queries instead of one, but both are index-optimal. Only called during import/scrape operations (low frequency) — medium priority.
+- **Expected impact estimate:** Likely minor at current library sizes; more relevant for imports with many canonical matches.
+- **Removal Safety:** Safe
+- **Reuse Scope:** local file (series-repository.ts)
+
+---
+
+### F-10 — `db.prepare()` Called Inside Loops (Statements Not Cached)
+
+- **Category:** DB / Algorithm  
+- **Severity:** Medium  
+- **Impact:** Eliminates repeated SQL compilation overhead inside tight loops  
+- **Evidence:**  
+  - `src/lib/series-repository.ts` line 518 — `db.prepare(INSERT INTO series_sources ...)` inside the source loop within `createSeries`  
+  - `src/lib/series-repository.ts` line 669 — same inside `updateSeries`  
+  - `src/lib/backup-service.ts` line 307, 318 — `db.prepare(INSERT INTO series ...)` and `db.prepare(INSERT INTO series_sources ...)` inside the `for (const item of loaded.snapshot.series)` loop in `restoreByBackupId`  
+- **Why it's inefficient:** `better-sqlite3`'s `db.prepare()` parses and compiles the SQL string on every call. While `better-sqlite3` is fast, calling `prepare()` 500 times for the same SQL string during a large restore is wasteful. The returned `Statement` object should be created once and reused.
+- **Recommended fix:**  
+  Hoist `db.prepare()` calls outside loops — define statements before the transaction:
+  ```typescript
+  const insertSource = db.prepare(`INSERT INTO series_sources (id, ...) VALUES (?, ...)`);
+  const tx = db.transaction(() => {
+    for (const src of sourceEntries) {
+      insertSource.run(...);
+    }
+  });
+  tx();
+  ```
+- **Tradeoffs / Risks:** None. `better-sqlite3` statements are reusable and thread-safe (Node.js is single-threaded). The compiled statement is valid as long as the DB instance is valid.
+- **Expected impact estimate:** 5–15% speedup on batch imports/restores; negligible for single-item operations.
+- **Removal Safety:** Safe
+- **Reuse Scope:** module (series-repository.ts, backup-service.ts)
+
+---
+
+### F-11 — `enrichImportedItems` is Dead Code (Exported but Never Imported)
+
+- **Category:** Dead Code  
+- **Severity:** Low  
+- **Impact:** Removes ~75 lines of unused code; eliminates maintenance burden and confusion about the enrichment flow  
+- **Evidence:** `src/lib/import-metadata.ts` line 468 — `export async function enrichImportedItems(...)` is exported but has zero importers in the codebase. Confirmed by grep: no file imports `enrichImportedItems`. This was the former synchronous enrichment path before the background queue was introduced.
+- **Why it's inefficient:** Dead code increases cognitive load and future maintenance risk (someone might incorrectly revive or reference it). Its presence implies the synchronous enrichment path is still live when it isn't.
+- **Recommended fix:** Remove the `enrichImportedItems` function and its internal `enrichOne` helper (~75 lines). Also verify `tryDownloadCoverImage` is still used by the queue worker (`applyEnrichment` in `import-enrichment-queue.ts`) before removing any cover-image imports.
+- **Tradeoffs / Risks:** Ensure no test file references it (the test file `import-handler.test.ts` or `importers.test.ts` should be checked).
+- **Expected impact estimate:** Build artifact size reduction (minor); clarity improvement.
+- **Removal Safety:** Needs Verification (check test files)
+- **Reuse Scope:** local file (import-metadata.ts)
+
+---
+
+### F-12 — Duplicate `sleep` Function and `ENRICH_MIN_CONFIDENCE` Constant
+
+- **Category:** Dead Code / Code Reuse  
+- **Severity:** Low  
+- **Impact:** Single source of truth; eliminates risk of divergence  
+- **Evidence:**  
+  - `src/lib/import-enrichment-queue.ts` line 30 and `src/lib/import-metadata.ts` line 30: identical `function sleep(ms: number): Promise<void>`  
+  - `src/lib/import-enrichment-queue.ts` line 26 and `src/lib/import-metadata.ts` line 28: both read `Number(process.env.ENRICH_MIN_CONFIDENCE || 0.72)` independently. If the default value or env var name ever changes, one copy will drift.
+- **Why it's inefficient:** Duplicated constants and utilities are a maintenance risk. Both files are in `src/lib/` — there's no architectural reason for the duplication.
+- **Recommended fix:**  
+  - Extract `sleep` to a shared module-level utility (e.g., `src/lib/async-utils.ts`) or inline `await new Promise(r => setTimeout(r, ms))` where used (it's only one line when inlined).  
+  - Extract enrichment-related env config to a single `enrichment-config.ts` module that both files import from.
+- **Tradeoffs / Risks:** Creates a new module dependency. Small refactor but worthwhile.
+- **Expected impact estimate:** No runtime impact; removes future bug surface.
+- **Removal Safety:** Safe
+- **Reuse Scope:** module (import-enrichment-queue.ts + import-metadata.ts)
+
+---
+
+### F-13 — Next.js Config is Empty — No Image Optimization or Bundle Configuration
+
+- **Category:** Build / Frontend  
+- **Severity:** Low  
+- **Impact:** Better bundle analysis; correct image optimization pipeline setup  
+- **Evidence:**  
+  - `next.config.ts` is entirely empty (`const nextConfig: NextConfig = {}`)  
+  - `src/app/page.tsx` uses `<Image ... unoptimized />` on cover images. The `unoptimized` prop disables all Next.js image optimization (format conversion, responsive sizing, CDN caching).  
+  - No bundle analyzer configured, so bundle size regressions go undetected.
+- **Why it's inefficient:** `unoptimized` is used because images are served from `/api/series/[id]/cover` (a dynamic endpoint), which Next.js's image optimizer cannot pre-process. This is actually the correct choice for dynamically served BLOBs. However, there are no `remotePatterns` configured, which blocks optimization for any future static cover URLs (e.g., from scrapers). Also, no `output: 'standalone'` is set for the Docker deployment, which means the container includes dev dependencies unnecessarily.
+- **Recommended fix:**
+  ```typescript
+  const nextConfig: NextConfig = {
+    output: "standalone", // for Docker: excludes node_modules from the image
+    experimental: {
+      // Enable if needed for future optimizations
+    },
+  };
+  ```
+  `unoptimized` on the BLOB-served covers is acceptable and should be documented as intentional.
+- **Tradeoffs / Risks:** `output: "standalone"` changes the build output structure — `docker-compose.yml` may need updating to reference `.next/standalone/server.js`. Test with existing Docker setup.
+- **Expected impact estimate:** Smaller Docker image; no runtime perf change.
+- **Removal Safety:** Needs Verification (Docker build change)
+- **Reuse Scope:** service-wide (build config)
+
+---
+
+### F-14 — `batchMergeSeriesByTitle` / `batchMergeSeriesByCanonicalOrTitle` Are Not Truly Batched
+
+- **Category:** DB / Algorithm  
+- **Severity:** Medium  
+- **Impact:** Reduces per-item round-trips during MAL/AniList content imports  
+- **Evidence:** `src/lib/series-repository.ts` lines 830–864 — `batchMergeSeriesByTitle` wraps individual `mergeSeriesByTitle` calls in one SQLite transaction. Each `mergeSeriesByTitle` calls `findSeriesByTitle` (SELECT) + either `createSeries` or `updateSeries` (which itself calls `getSeriesById` = another SELECT + sources SELECT + enrichment SELECT, plus the UPDATE).  
+  For a 500-item import: up to 500 × 4 SELECT queries + 500 × 1 INSERT/UPDATE = ~2500 DB operations all within one transaction.
+- **Why it's inefficient:** The outer transaction is correct (atomicity) but the inner per-item logic does a SELECT-per-item for title lookup. A single `SELECT id, title FROM series` (all rows) at the start of the batch, built into a Map, would eliminate 500 individual lookups.
+- **Recommended fix:**  
+  Pre-fetch all existing series titles (and canonical IDs) into a Map before the loop:
+  ```typescript
+  const existing = db.prepare("SELECT id, LOWER(title) as ltitle FROM series").all() as ...;
+  const byTitle = new Map(existing.map(r => [r.ltitle, r.id]));
+  
+  for (const item of items) {
+    const existingId = byTitle.get(item.title.trim().toLowerCase());
+    // use existingId to branch to insert or update (with cached statements)
+  }
+  ```
+  This trades N individual SELECT queries for 1 bulk SELECT.
+- **Tradeoffs / Risks:** Requires restructuring the batch functions — higher refactor effort. The existing outer-transaction approach correctly prevents interleaving. The main tradeoff is complexity vs. performance.
+- **Expected impact estimate:** 4–10× speedup for large batch imports (500 items: ~2500 queries → ~500 queries).
+- **Removal Safety:** Needs Verification (logic refactor)
+- **Reuse Scope:** module (series-repository.ts)
+
+---
+
+### F-15 — `daily backup check` runs on every `GET /api/series`
+
+- **Category:** DB / Reliability  
+- **Severity:** Low  
+- **Impact:** Negligible individually, cumulative with high polling frequency  
+- **Evidence:** `src/app/api/series/route.ts` line 16 — `runDailyBackupIfNeeded()` is called on every GET request to `/api/series`. With the 5-second polling interval active (F-05), this means up to 12 DB lookups-per-minute checking for the daily backup record, even though the module-level `dailyBackupCheckedDate` guard prevents the actual DB query after the first check per day. The guard (`dailyBackupCheckedDate === today`) is a module-level `let` — safe in a single-process Node.js server, but means the first check each day always hits the DB.
+- **Why it's inefficient:** The function's own guard makes this cheap (one module-level string comparison per call after the first DB hit). However, this is an `undefined → today` day boundary case: when the server starts or the date rolls over, the next call to `GET /api/series` (possibly a polling tick) creates a backup that calls `listSeries({})` (loading all BLOBs — see F-01).
+- **Recommended fix:** No code change needed once F-01 is applied. The guard is correct and efficient. Document the design.
+- **Expected impact estimate:** Near zero once F-01 is applied.
+- **Removal Safety:** Safe (no change needed)
+- **Reuse Scope:** local (backup-service.ts)
+
+---
+
+### F-16 — `exportMalCompatibleXml` Calls `listSeries({})` Independently
+
+- **Category:** DB / Dead Code  
+- **Severity:** Low  
+- **Impact:** Minor — eliminates one redundant full-table scan if export is called alongside other list operations  
+- **Evidence:** `src/lib/exporters.ts` lines 9, 11 — both `exportFullDatabase()` and `exportMalCompatibleXml()` each call `listSeries({})`. They are called from different API routes (`/api/export/...`) so they don't run together in practice. However, `exportMalCompatibleXml` also triggers a BLOB load per row (same F-01 issue).
+- **Recommended fix:** Apply F-01. The export functions will then be fast regardless. No structural change needed.
+- **Expected impact estimate:** Low standalone value; fixed as side-effect of F-01.
+- **Removal Safety:** Safe
+- **Reuse Scope:** local (exporters.ts)
+
+---
+
+### F-17 — Zod Schema Parsed Inside Tight Row-Mapping Loops
+
+- **Category:** CPU / Algorithm  
+- **Severity:** Low  
+- **Impact:** Minor CPU reduction in list endpoints with many sources  
+- **Evidence:**  
+  - `src/lib/series-repository.ts` line 166 — `parseRereadSessions` calls `z.array(rereadSessionSchema).parse(parsed)` for every series row  
+  - `src/lib/series-repository.ts` line 222 — `parseSourceError` calls `z.object(...).parse(parsed)` for every source row  
+- **Why it's inefficient:** Zod schema compilation and validation is not free. For a library of 500 series with 2 sources each, `parseSourceError` is called ~1000 times per list request. The schemas are simple objects, but Zod internally creates new validators on each call if not cached.
+- **Recommended fix:**  
+  - `parseSourceError`: Replace with plain JSON.parse + property checks (the schema is trivially simple: `{ message: string, timestamp: string }`):
+    ```typescript
+    function parseSourceError(raw: string | null): SourceErrorInfo | null {
+      if (!raw) return null;
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (typeof parsed !== "object" || !parsed) return null;
+        const { message, timestamp } = parsed as Record<string, unknown>;
+        if (typeof message !== "string" || typeof timestamp !== "string") return null;
+        return { message, timestamp };
+      } catch { return null; }
+    }
+    ```
+  - `parseRereadSessions`: Similarly, Zod is used defensively here but plain parsing with type guards is sufficient since the data round-tripped through `JSON.stringify` from the repo itself.
+- **Tradeoffs / Risks:** Removes Zod validation on trusted internal data (data read from SQLite that was written by the same application). Acceptable tradeoff.
+- **Expected impact estimate:** 5–15% reduction in CPU time for large list calls. Low priority.
+- **Removal Safety:** Likely Safe
+- **Reuse Scope:** local file (series-repository.ts)
+
+---
+
+### F-18 — `vitest.config.ts` Not Reviewed for Coverage Scope / Performance
+
+- **Category:** Build  
+- **Severity:** Low  
+- **Impact:** Faster CI feedback if test scope is well-defined  
+- **Evidence:** `vitest.config.ts` exists but was not read during this audit.  
+- **Recommended action:** Verify test isolation — particularly that `import-handler.test.ts` and `importers.test.ts` don't spin up a real SQLite connection on every test run. If they do, using an in-memory database (`":memory:"`) would speed up test execution.
+- **Expected impact estimate:** Unknown without reading the test config.
 - **Removal Safety:** Needs Verification
-- **Reuse Scope:** `series-repository.ts`, both import routes
 
 ---
 
 ## 3) Quick Wins (Do First)
 
-Ordered by impact-to-effort ratio:
+These changes are low-effort, high-impact, and can be done in isolation:
 
-| # | Finding | Effort | Impact |
-|---|---|---|---|
-| 1 | **F-03**: Replace `statSync` loop with filename sort in `rotateBackups` | 5 min | High |
-| 2 | **F-04**: Add in-memory guard to `runDailyBackupIfNeeded` | 10 min | High |
-| 3 | **F-16**: Add `busy_timeout` pragma to `getDb` | 2 min | Low (reliability) |
-| 4 | **F-15**: Remove pretty-printing from `JSON.stringify` in backups | 1 min | Low |
-| 5 | **F-11**: Add error handling to `handleSave` in detail page | 15 min | Medium (reliability) |
-| 6 | **F-10**: Update `changeChapter` to use PATCH response instead of full refresh | 15 min | Medium |
-| 7 | **F-02**: Add backup throttle/cooldown for "change" backups | 20 min | High |
+| Priority | Finding | Estimated Effort | Impact |
+|----------|---------|-----------------|--------|
+| 1 | **F-01**: Replace `SELECT *` with explicit columns excluding `cover_image_blob` | 1–2 h | Critical — memory |
+| 2 | **F-04**: Batch `hasPendingLikeJob` into single IN-query | 30 min | High — MAL import latency |
+| 3 | **F-08**: Skip DELETE+INSERT sources when `input.sources` not provided | 20 min | Medium — every PATCH |
+| 4 | **F-10**: Hoist `db.prepare()` outside loops in batch restore and create/update | 30 min | Medium — batch ops |
+| 5 | **F-05**: Fix enrichment polling `useEffect` deps with `useRef` | 30 min | Medium — correctness |
+| 6 | **F-11**: Remove dead `enrichImportedItems` function | 15 min | Low — clarity |
+| 7 | **F-12**: Deduplicate `sleep` and `ENRICH_MIN_CONFIDENCE` | 20 min | Low — maintainability |
 
 ---
 
 ## 4) Deeper Optimizations (Do Next)
 
-1. **F-01 — N+1 Fix:** Rewrite `attachSources` to use a batched IN query. This is the highest-ROI structural DB change and requires a careful test of the `listSeries` → `getSeriesById` → `createSeries` → `updateSeries` call graph.
+These are more invasive but worth doing as the library grows:
 
-2. **F-05 — Add DB Indexes:** Add a migration v3 with all missing indexes. Run `EXPLAIN QUERY PLAN` on the key SELECT statements before and after to confirm index usage.
+1. **F-02 — Eliminate read-before-write in `updateSeries`**: Refactor to use SQL `COALESCE`-based partial update directly from the payload. Biggest win when combined with F-01.
 
-3. **F-06 — Server-Side Status Filter:** Push `statusFilter` to the API. Requires a separate stats/counts endpoint or embedding counts in the list response to keep the tab bar accurate. Consider adding a `GET /api/series/counts` endpoint returning status group counts without transferring full series objects.
+2. **F-03 — Puppeteer singleton browser**: Replace per-request browser spawn with a singleton + idle-timeout teardown. Required if scraping becomes a frequent workflow.
 
-4. **F-12 — Shared Frontend Module:** Extract `src/lib/ui-types.ts` and `src/lib/ui-utils.ts`. This prevents type drift, reduces bundle size marginally, and centralizes form logic for future pages.
+3. **F-07 — SQLite FTS5 for title search**: Add a migration creating an `fts5` virtual table with sync triggers. Future-proofs the title search as the library grows past 1000 entries.
 
-5. **F-13 — Shared Import Handler:** Extract a generic `runImport` helper to eliminate the near-duplicate import routes. This is a low-risk refactor with high maintenance benefit.
+4. **F-06 — Merge `listSeries` + `getStatusCounts` into one query**: Moderate refactor — consider once F-01 is complete to ensure the combined query is also BLOB-clean.
 
-6. **F-17 — Batch Import Transaction:** Wrap the import loop in a single SQLite transaction and pre-fetch all existing titles in one query. This is the most complex change but dramatically improves large import performance.
+5. **F-14 — True batch mode for `batchMergeSeriesByTitle`**: Pre-fetch all titles into a Map before the loop. High effort, high impact for large imports. Required if import sizes exceed 1000 entries consistently.
 
-7. **F-07 + F-08 — Eliminate Redundant Post-Write SELECTs / Centralize Migration Init:** Construct return values from in-memory state after writes. Move `runMigrations()` into `getDb()` with circular import resolution (pass db reference into migrations).
+6. **F-09 — Replace LEFT JOIN+OR in `findSeriesByCanonicalSource` with UNION**: Low frequency but conceptually cleaner.
 
 ---
 
 ## 5) Validation Plan
 
+### Before/After Metrics to Collect
+
+```
+# Memory: Node.js heap before and after a listSeries call
+node --inspect next start
+# Use Chrome DevTools > Memory > Heap Snapshot
+# Compare heap after GET /api/series with 100 series (10 with cover images)
+```
+
+```
+# SQLite query count: wrap db.prepare().all() with a counter
+# or enable SQLite query logging via the trace pragma:
+db.pragma("wal_autocheckpoint = 1000");
+db.on("trace", (sql: string) => console.log("[SQL]", sql));
+```
+
 ### Benchmarks
 
-1. **Baseline list latency** — Time `GET /api/series` (no filters) with 100, 300, 500 series using `curl -w "%{time_total}"`. Record before and after F-01 fix.
+| Scenario | Current Baseline | Target After F-01 |
+|----------|-----------------|-------------------|
+| `GET /api/series` (100 series, 50% with covers) | Measure heap delta | < 5 MB |
+| `POST /api/import/mal` (500 entries) | Measure wall-clock time | < 2 s |
+| `createBackup` (100 series) | Measure wall-clock time | < 200 ms |
+| Dashboard polling tick (5s interval) | Measure heap delta | Near zero |
 
-2. **Mutation + backup latency** — Time `PATCH /api/series/:id` (chapter +1) before/after F-02 + F-03 fixes with 60 backup files in the directory.
+### Correctness Tests to Run After Each Change
 
-3. **Import throughput** — Time a 300-item MAL import before/after F-17 batch fix.
-
-### Profiling Strategy
-
-```bash
-# Instrument SQLite query count — add a counter to db.ts:
-# globalThis.__queryCount = 0;
-# wrap db.prepare() to increment counter
-
-# Then in a test:
-GET /api/series  # record __queryCount before, after
-# For N series: expected before = N+1, after = 2
-```
-
-### Metrics to Compare Before/After
-
-| Metric | Before | Target |
-|---|---|---|
-| Queries per `GET /api/series` (N=200) | ~201 | 2 |
-| Queries per `PATCH /api/series/:id` | ~7 | 3 |
-| Backup files per 10 chapter increments | 10 | 0–1 |
-| `rotateBackups` syscalls per rotation (60 files) | 60 statSync | 0 statSync |
-| Daily backup check queries per search keystroke | 1 | 0 (memory guard) |
-
-### Correctness Test Cases
-
-- After F-01: verify `series.sources` on all returned items matches pre-fix output.
-- After F-02: verify that a "change" backup IS created if the cooldown has elapsed, and is NOT created within the cooldown window.
-- After F-03: verify old backup files are correctly deleted when limit is exceeded; new file is kept.
-- After F-06: verify tab counts still reflect full-library totals (not just filtered subset counts).
-- After F-17: verify that `mergeSeriesByTitle` still correctly preserves `chaptersRead`, `rating`, `personalNotes` from the existing record on merge.
+- Run `npm test` (vitest) after every change; current test suite covers import-handler and importers.
+- For F-01: Manually verify cover images still load after applying the column exclusion (the `/cover` endpoint is unchanged but `hasCoverImage` computation moves to a SQL expression).
+- For F-04: Import a 500-entry MAL list and verify all enrichment jobs are enqueued correctly.
+- For F-05: Open the dashboard during an active enrichment run and observe that status badges update within ~5–10s without console errors.
+- For F-08: Run a chapter +1 update and verify sources are unchanged in the DB.
 
 ---
 
-## 6) Optimized Code / Patch
+## 6) Optimized Code Patches
 
-### Patch 1 — F-03: `rotateBackups` without statSync
+### Patch A — F-01: Explicit SELECT excluding `cover_image_blob`
 
-**File:** `src/lib/backup-service.ts`
+Replace the `SeriesRow` type and list/find queries in `src/lib/series-repository.ts`:
 
-```ts
+```typescript
 // BEFORE
-function rotateBackups(): void {
-  const files = fs
-    .readdirSync(dataPaths.backupsDir)
-    .filter((file) => file.endsWith(".json"))
-    .map((file) => {
-      const fullPath = path.join(dataPaths.backupsDir, file);
-      return {
-        file,
-        fullPath,
-        mtimeMs: fs.statSync(fullPath).mtimeMs,
-      };
-    })
-    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+type SeriesRow = {
+  // ...
+  cover_image_blob: Uint8Array | null;
+  // ...
+};
 
-  const limit = maxBackups();
-  if (files.length <= limit) {
-    return;
-  }
-
-  for (const item of files.slice(limit)) {
-    fs.unlinkSync(item.fullPath);
-  }
-}
-
-// AFTER
-function rotateBackups(): void {
-  const files = fs
-    .readdirSync(dataPaths.backupsDir)
-    .filter((f) => f.endsWith(".json"))
-    .sort()      // ISO timestamp prefix -> lexicographic order = chronological
-    .reverse();  // newest first
-
-  const limit = maxBackups();
-  for (const file of files.slice(limit)) {
-    fs.unlinkSync(path.join(dataPaths.backupsDir, file));
-  }
-}
+// AFTER: replace cover_image_blob with computed boolean from SQL
+type SeriesRow = {
+  // ... all other fields identical ...
+  has_cover_image: number;           // computed: (cover_image_blob IS NOT NULL AND LENGTH(cover_image_blob) > 0)
+  cover_image_mime_type: string | null;
+  // cover_image_blob removed
+};
 ```
+
+```diff
+// mapSeriesRow
+- hasCoverImage: Boolean(row.cover_image_blob && row.cover_image_blob.length > 0),
++ hasCoverImage: Boolean(row.has_cover_image),
+```
+
+```diff
+// listSeries query
+- "SELECT * FROM series",
++ `SELECT id, title, total_chapters, chapters_read, start_date, finish_date,
++          rating, description, personal_notes, status, reread, total_rereads,
++          reread_sessions, novel_to_read, follow_updates, preferred_source_type,
++          cover_image_mime_type, cover_image_fetched_at, metadata_fetched_at,
++          metadata_source_url, metadata_source_site, metadata_source_canonical_id,
++          metadata_source_updated_at, created_at, updated_at,
++          CASE WHEN cover_image_blob IS NOT NULL AND LENGTH(cover_image_blob) > 0 THEN 1 ELSE 0 END AS has_cover_image
++  FROM series`,
+```
+
+Apply the same column list to `getSeriesById`, `findSeriesByTitle`, and `findSeriesByCanonicalSource`.
 
 ---
 
-### Patch 2 — F-04: In-memory guard for daily backup check
+### Patch B — F-04: Batched Enrichment Enqueue
 
-**File:** `src/lib/backup-service.ts`
+Replace `enqueueImportEnrichmentJobs` in `src/lib/import-enrichment-queue.ts`:
 
-```ts
-// Add at module level:
-let dailyBackupCheckedDate = "";
+```typescript
+export function enqueueImportEnrichmentJobs(source: ImportSource, seriesIds: string[]): number {
+  if (seriesIds.length === 0) return 0;
 
-// REPLACE runDailyBackupIfNeeded:
-export function runDailyBackupIfNeeded(): { created: boolean; fileName?: string } {
-  const today = new Date().toISOString().slice(0, 10);
-  if (dailyBackupCheckedDate === today) {
-    return { created: false };
-  }
-
-  runMigrations();
   const db = getDb();
+  const uniqueIds = [...new Set(seriesIds)];
+  const placeholders = uniqueIds.map(() => "?").join(", ");
+
   const existing = db
     .prepare(
-      `SELECT id FROM backups WHERE reason = 'daily' AND substr(created_at, 1, 10) = ? LIMIT 1`
+      `SELECT series_id FROM import_enrichment_jobs
+       WHERE series_id IN (${placeholders}) AND source = ? AND status IN ('pending', 'running')`,
     )
-    .get(today) as { id: string } | undefined;
+    .all(...uniqueIds, source) as Array<{ series_id: string }>;
 
-  if (existing) {
-    dailyBackupCheckedDate = today;
-    return { created: false };
+  const alreadyQueued = new Set(existing.map((r) => r.series_id));
+  const toQueue = uniqueIds.filter((id) => !alreadyQueued.has(id));
+
+  if (toQueue.length > 0) {
+    const now = nowIso();
+    const insert = db.prepare(
+      `INSERT INTO import_enrichment_jobs
+       (id, series_id, source, status, attempts, next_retry_at, last_error, created_at, updated_at)
+       VALUES (?, ?, ?, 'pending', 0, ?, NULL, ?, ?)`,
+    );
+    const batch = db.transaction(() => {
+      for (const id of toQueue) {
+        insert.run(randomUUID(), id, source, now, now, now);
+      }
+    });
+    batch();
   }
 
-  const backup = createBackup("daily");
-  dailyBackupCheckedDate = today;
-  return { created: true, fileName: backup.fileName };
+  startEnrichmentWorker();
+  return toQueue.length;
 }
 ```
 
 ---
 
-### Patch 3 — F-02: Throttle "change" backups
+### Patch C — F-08: Skip Source Upsert When Sources Not in Payload
 
-**File:** `src/lib/backup-service.ts`
+In `updateSeries` transaction body (`src/lib/series-repository.ts`):
 
-```ts
-// Add at module level:
-let lastChangeBackupAt = 0;
-const CHANGE_BACKUP_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes
-
-// New export:
-export function createChangeBackupIfCooledDown(): void {
-  const now = Date.now();
-  if (now - lastChangeBackupAt < CHANGE_BACKUP_COOLDOWN_MS) return;
-  lastChangeBackupAt = now;
-  createBackup("change");
-}
+```diff
+  // After the series UPDATE statement...
+  
+- db.prepare("DELETE FROM series_sources WHERE series_id = ?").run(id);
+- for (const src of sourceEntries) {
+-   db.prepare(`INSERT INTO series_sources ...`).run(...);
+- }
++ if (input.sources !== undefined) {
++   db.prepare("DELETE FROM series_sources WHERE series_id = ?").run(id);
++   const insertSrc = db.prepare(`INSERT INTO series_sources
++     (id, series_id, type, url, site, canonical_id, scraped_at, scraper_name, last_error, meta, created_at)
++     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
++   for (const src of sourceEntries) {
++     insertSrc.run(src.id, src.seriesId, src.type, src.url, src.site, src.canonicalId,
++                   src.scrapedAt, src.scraperName,
++                   src.lastError ? JSON.stringify(src.lastError) : null,
++                   src.meta ? JSON.stringify(src.meta) : null, now);
++   }
++ }
 ```
 
-Then in `src/app/api/series/route.ts`, `src/app/api/series/[id]/route.ts`:
+Note: `merged.sources` will be `existing.sources` when `input.sources` is `undefined`, so the returned object should also prefer `existing.sources` in that case:
 
-```ts
-// Replace createBackup("change") with:
-createChangeBackupIfCooledDown();
-```
-
----
-
-### Patch 4 — F-01: Batched source loading
-
-**File:** `src/lib/series-repository.ts`
-
-```ts
-// REPLACE attachSources:
-function attachSources(rows: SeriesRow[]): Series[] {
-  if (rows.length === 0) return [];
-  const db = getDb();
-  const ids = rows.map((r) => r.id);
-  const placeholders = ids.map(() => "?").join(", ");
-  const srcRows = db
-    .prepare(
-      `SELECT id, series_id, type, url FROM series_sources WHERE series_id IN (${placeholders})`
-    )
-    .all(...ids) as Array<{ id: string; series_id: string; type: SourceType; url: string }>;
-
-  const byId = new Map<string, Series["sources"]>();
-  for (const s of srcRows) {
-    const arr = byId.get(s.series_id) ?? [];
-    arr.push({ id: s.id, seriesId: s.series_id, type: s.type, url: s.url });
-    byId.set(s.series_id, arr);
-  }
-
-  return rows.map((row) => ({
-    ...mapSeriesRow(row),
-    sources: byId.get(row.id) ?? [],
-  }));
-}
+```diff
+  return {
+    ...merged,
+-   sources: sourceEntries,
++   sources: input.sources !== undefined ? sourceEntries : existing.sources,
+    updatedAt: now,
+  };
 ```
 
 ---
 
-### Patch 5 — F-05: Missing indexes (Migration v3)
-
-**File:** `src/lib/migrations.ts`
-
-```ts
-// Add after the existing version 2 block:
-if (version.version < 3) {
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_series_sources_series_id
-      ON series_sources(series_id);
-    CREATE INDEX IF NOT EXISTS idx_series_updated_at
-      ON series(updated_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_backups_reason_created_at
-      ON backups(reason, created_at);
-    CREATE INDEX IF NOT EXISTS idx_series_lower_title
-      ON series(LOWER(title));
-  `);
-  db.prepare(
-    "INSERT INTO schema_migrations(version, executed_at) VALUES (?, ?)"
-  ).run(3, new Date().toISOString());
-}
-```
-
----
-
-### Patch 6 — F-16: SQLite `busy_timeout`
-
-**File:** `src/lib/db.ts`
-
-```ts
-dbInstance.pragma("journal_mode = WAL");
-dbInstance.pragma("foreign_keys = ON");
-dbInstance.pragma("busy_timeout = 5000"); // ← add this line
-```
-
----
-
-### Patch 7 — F-10: Use PATCH response in `changeChapter`
-
-**File:** `src/app/page.tsx`
-
-```ts
-async function changeChapter(id: string, delta: number) {
-  const item = items.find((i) => i.id === id);
-  if (!item) return;
-  const next = clampInt(item.chaptersRead + delta);
-  const res = await fetch(`/api/series/${id}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chaptersRead: next }),
-  });
-  if (res.ok) {
-    const json = (await res.json()) as { data: Series };
-    setItems((prev) => prev.map((i) => (i.id === id ? json.data : i)));
-  }
-}
-```
-
----
-
-*End of OPTIMIZATIONS.md*
+*End of audit.*

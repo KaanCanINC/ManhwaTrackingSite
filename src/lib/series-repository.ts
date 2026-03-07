@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { getDb } from "@/lib/db";
 import type {
+  MetadataSourceSite,
   PreferredSourceType,
   RereadSession,
   Series,
@@ -53,6 +54,10 @@ const baseSeriesSchema = z.object({
   coverImageMimeType: z.string().trim().min(1).nullable().optional(),
   coverImageFetchedAt: z.string().datetime().nullable().optional(),
   metadataFetchedAt: z.string().datetime().nullable().optional(),
+  metadataSourceUrl: z.string().url().nullable().optional(),
+  metadataSourceSite: z.enum(["myanimelist", "anilist"]).nullable().optional(),
+  metadataSourceCanonicalId: z.string().trim().min(1).nullable().optional(),
+  metadataSourceUpdatedAt: z.string().datetime().nullable().optional(),
   sources: z.array(sourceSchema).default([]),
 });
 
@@ -76,13 +81,71 @@ type SeriesRow = {
   novel_to_read: number;
   follow_updates: number;
   preferred_source_type: PreferredSourceType | null;
-  cover_image_blob: Uint8Array | null;
+  has_cover_image: number;
   cover_image_mime_type: string | null;
   cover_image_fetched_at: string | null;
   metadata_fetched_at: string | null;
+  metadata_source_url: string | null;
+  metadata_source_site: MetadataSourceSite | null;
+  metadata_source_canonical_id: string | null;
+  metadata_source_updated_at: string | null;
   created_at: string;
   updated_at: string;
 };
+
+function detectMetadataSourceSite(url: string): MetadataSourceSite | null {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    if (host === "myanimelist.net" || host.endsWith(".myanimelist.net")) {
+      return "myanimelist";
+    }
+    if (host === "anilist.co" || host.endsWith(".anilist.co")) {
+      return "anilist";
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeMetadataSource(input: {
+  metadataSourceUrl?: string | null;
+  metadataSourceSite?: MetadataSourceSite | null;
+  metadataSourceCanonicalId?: string | null;
+  metadataSourceUpdatedAt?: string | null;
+}): {
+  url: string | null;
+  site: MetadataSourceSite | null;
+  canonicalId: string | null;
+  updatedAt: string | null;
+} {
+  const rawUrl = input.metadataSourceUrl?.trim() || "";
+  if (!rawUrl) {
+    return {
+      url: null,
+      site: null,
+      canonicalId: null,
+      updatedAt: null,
+    };
+  }
+
+  const detectedSite = detectMetadataSourceSite(rawUrl);
+  if (!detectedSite) {
+    throw new Error("Metadata source URL must be an AniList or MyAnimeList link");
+  }
+
+  if (input.metadataSourceSite && input.metadataSourceSite !== detectedSite) {
+    throw new Error("Metadata source site does not match metadata source URL");
+  }
+
+  return {
+    url: rawUrl,
+    site: detectedSite,
+    canonicalId: input.metadataSourceCanonicalId?.trim() || null,
+    updatedAt: input.metadataSourceUpdatedAt ?? new Date().toISOString(),
+  };
+}
 
 type SeriesSourceRow = {
   id: string;
@@ -100,12 +163,12 @@ type SeriesSourceRow = {
 function parseRereadSessions(raw: string): RereadSession[] {
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return z
-      .array(rereadSessionSchema)
-      .parse(parsed)
-      .map((session) => ({
-        startDate: session.startDate ?? null,
-        finishDate: session.finishDate ?? null,
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item): item is Record<string, unknown> => item !== null && typeof item === "object" && !Array.isArray(item))
+      .map((item) => ({
+        startDate: typeof item.startDate === "string" ? item.startDate : null,
+        finishDate: typeof item.finishDate === "string" ? item.finishDate : null,
       }));
   } catch {
     return [];
@@ -130,10 +193,14 @@ function mapSeriesRow(row: SeriesRow): Omit<Series, "sources"> {
     novelToRead: Boolean(row.novel_to_read),
     followUpdates: Boolean(row.follow_updates),
     preferredSourceType: row.preferred_source_type,
-    hasCoverImage: Boolean(row.cover_image_blob && row.cover_image_blob.length > 0),
+    hasCoverImage: Boolean(row.has_cover_image),
     coverImageMimeType: row.cover_image_mime_type,
     coverImageFetchedAt: row.cover_image_fetched_at,
     metadataFetchedAt: row.metadata_fetched_at,
+    metadataSourceUrl: row.metadata_source_url,
+    metadataSourceSite: row.metadata_source_site,
+    metadataSourceCanonicalId: row.metadata_source_canonical_id,
+    metadataSourceUpdatedAt: row.metadata_source_updated_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -156,13 +223,19 @@ function parseSourceError(raw: string | null): SourceErrorInfo | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as unknown;
-    const result = z
-      .object({
-        message: z.string(),
-        timestamp: z.string().datetime(),
-      })
-      .parse(parsed);
-    return result;
+    if (
+      parsed !== null &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed) &&
+      typeof (parsed as Record<string, unknown>).message === "string" &&
+      typeof (parsed as Record<string, unknown>).timestamp === "string"
+    ) {
+      return {
+        message: (parsed as { message: string; timestamp: string }).message,
+        timestamp: (parsed as { message: string; timestamp: string }).timestamp,
+      };
+    }
+    return null;
   } catch {
     return null;
   }
@@ -223,6 +296,65 @@ function attachSources(rows: SeriesRow[]): Series[] {
     ...mapSeriesRow(row),
     sources: byId.get(row.id) ?? [],
   }));
+}
+
+type EnrichmentStateRow = {
+  series_id: string;
+  rank: number;
+  last_error: string | null;
+};
+
+function enrichmentStatusFromRank(rank: number): Series["enrichmentStatus"] {
+  if (rank >= 3) return "failed";
+  if (rank >= 2) return "running";
+  if (rank >= 1) return "pending";
+  return null;
+}
+
+function attachEnrichmentStates(items: Series[]): Series[] {
+  if (items.length === 0) return items;
+
+  const db = getDb();
+  const ids = items.map((item) => item.id);
+  const placeholders = ids.map(() => "?").join(", ");
+
+  const rows = db
+    .prepare(
+      `SELECT
+         series_id,
+         MAX(CASE status WHEN 'failed' THEN 3 WHEN 'running' THEN 2 WHEN 'pending' THEN 1 ELSE 0 END) AS rank,
+         MAX(
+           CASE
+             WHEN status = 'failed' THEN last_error
+             WHEN status = 'done' AND last_error = 'ecchi_warning' THEN last_error
+             ELSE NULL
+           END
+         ) AS last_error
+       FROM import_enrichment_jobs
+       WHERE series_id IN (${placeholders})
+         AND status IN ('pending', 'running', 'failed', 'done')
+       GROUP BY series_id`,
+    )
+    .all(...ids) as EnrichmentStateRow[];
+
+  const bySeriesId = new Map(
+    rows.map((row) => [
+      row.series_id,
+      {
+        status: enrichmentStatusFromRank(row.rank),
+        lastError: row.last_error,
+      },
+    ]),
+  );
+
+  return items.map((item) => {
+    const state = bySeriesId.get(item.id);
+    return {
+      ...item,
+      enrichmentStatus: state?.status ?? null,
+      enrichmentLastError: state?.lastError ?? null,
+    };
+  });
 }
 
 export function getStatusCounts(filters: Omit<SeriesFilters, "status"> = {}): Record<SeriesStatus, number> {
@@ -301,7 +433,15 @@ export function listSeries(filters: SeriesFilters = {}): Series[] {
   }
 
   const sql = [
-    "SELECT * FROM series",
+    `SELECT id, title, total_chapters, chapters_read, start_date, finish_date, rating,
+            description, personal_notes, status, reread, total_rereads, reread_sessions,
+            novel_to_read, follow_updates, preferred_source_type,
+            cover_image_mime_type, cover_image_fetched_at,
+            metadata_fetched_at, metadata_source_url, metadata_source_site,
+            metadata_source_canonical_id, metadata_source_updated_at,
+            created_at, updated_at,
+            CASE WHEN cover_image_blob IS NOT NULL AND LENGTH(cover_image_blob) > 0 THEN 1 ELSE 0 END AS has_cover_image
+     FROM series`,
     where.length ? `WHERE ${where.join(" AND ")}` : "",
     "ORDER BY updated_at DESC",
   ]
@@ -309,21 +449,33 @@ export function listSeries(filters: SeriesFilters = {}): Series[] {
     .join(" ");
 
   const rows = db.prepare(sql).all(...params) as SeriesRow[];
-  return attachSources(rows);
+  return attachEnrichmentStates(attachSources(rows));
 }
 
 export function getSeriesById(id: string): Series | null {
   const db = getDb();
-  const row = db.prepare("SELECT * FROM series WHERE id = ?").get(id) as SeriesRow | undefined;
+  const row = db.prepare(
+    `SELECT id, title, total_chapters, chapters_read, start_date, finish_date, rating,
+            description, personal_notes, status, reread, total_rereads, reread_sessions,
+            novel_to_read, follow_updates, preferred_source_type,
+            cover_image_mime_type, cover_image_fetched_at,
+            metadata_fetched_at, metadata_source_url, metadata_source_site,
+            metadata_source_canonical_id, metadata_source_updated_at,
+            created_at, updated_at,
+            CASE WHEN cover_image_blob IS NOT NULL AND LENGTH(cover_image_blob) > 0 THEN 1 ELSE 0 END AS has_cover_image
+     FROM series WHERE id = ?`,
+  ).get(id) as SeriesRow | undefined;
 
   if (!row) {
     return null;
   }
 
-  return {
+  return attachEnrichmentStates([
+    {
     ...mapSeriesRow(row),
     sources: getSources(row.id),
-  };
+    },
+  ])[0] || null;
 }
 
 export function createSeries(payload: unknown): Series {
@@ -331,6 +483,7 @@ export function createSeries(payload: unknown): Series {
   const input = createSeriesSchema.parse(payload);
   const id = randomUUID();
   const now = new Date().toISOString();
+  const metadataSource = normalizeMetadataSource(input);
 
   const sourceEntries = input.sources.map((s) => ({
     id: randomUUID(),
@@ -351,9 +504,10 @@ export function createSeries(payload: unknown): Series {
       INSERT INTO series (
         id, title, total_chapters, chapters_read, start_date, finish_date, rating,
         description, personal_notes, status, reread, total_rereads, reread_sessions,
-        novel_to_read, follow_updates, preferred_source_type, created_at, updated_at
+        novel_to_read, follow_updates, preferred_source_type, created_at, updated_at,
+        metadata_source_url, metadata_source_site, metadata_source_canonical_id, metadata_source_updated_at
         , cover_image_blob, cover_image_mime_type, cover_image_fetched_at, metadata_fetched_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     ).run(
       id,
@@ -374,18 +528,23 @@ export function createSeries(payload: unknown): Series {
       input.preferredSourceType,
       now,
       now,
+      metadataSource.url,
+      metadataSource.site,
+      metadataSource.canonicalId,
+      metadataSource.updatedAt,
       input.coverImageBlob ?? null,
       input.coverImageMimeType ?? null,
       input.coverImageFetchedAt ?? null,
       input.metadataFetchedAt ?? null,
     );
 
+    const insertSource = db.prepare(
+      `INSERT INTO series_sources
+       (id, series_id, type, url, site, canonical_id, scraped_at, scraper_name, last_error, meta, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
     for (const src of sourceEntries) {
-      db.prepare(
-        `INSERT INTO series_sources
-         (id, series_id, type, url, site, canonical_id, scraped_at, scraper_name, last_error, meta, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
+      insertSource.run(
         src.id,
         src.seriesId,
         src.type,
@@ -427,6 +586,10 @@ export function createSeries(payload: unknown): Series {
     coverImageMimeType: input.coverImageMimeType ?? null,
     coverImageFetchedAt: input.coverImageFetchedAt ?? null,
     metadataFetchedAt: input.metadataFetchedAt ?? null,
+    metadataSourceUrl: metadataSource.url,
+    metadataSourceSite: metadataSource.site,
+    metadataSourceCanonicalId: metadataSource.canonicalId,
+    metadataSourceUpdatedAt: metadataSource.updatedAt,
     sources: sourceEntries,
     createdAt: now,
     updatedAt: now,
@@ -448,19 +611,27 @@ export function updateSeries(id: string, payload: unknown): Series | null {
     sources: input.sources ?? existing.sources,
   };
   const now = new Date().toISOString();
+  const metadataSource = normalizeMetadataSource({
+    metadataSourceUrl: input.metadataSourceUrl ?? existing.metadataSourceUrl,
+    metadataSourceSite: input.metadataSourceSite ?? existing.metadataSourceSite,
+    metadataSourceCanonicalId: input.metadataSourceCanonicalId ?? existing.metadataSourceCanonicalId,
+    metadataSourceUpdatedAt: input.metadataSourceUpdatedAt ?? existing.metadataSourceUpdatedAt,
+  });
 
-  const sourceEntries = merged.sources.map((s) => ({
-    id: randomUUID(),
-    seriesId: id,
-    type: s.type,
-    url: s.url,
-    site: s.site ?? null,
-    canonicalId: s.canonicalId ?? null,
-    scrapedAt: s.scrapedAt ?? null,
-    scraperName: s.scraperName ?? null,
-    lastError: s.lastError ?? null,
-    meta: s.meta ?? null,
-  }));
+  const sourceEntries = input.sources !== undefined
+    ? input.sources.map((s) => ({
+        id: randomUUID(),
+        seriesId: id,
+        type: s.type,
+        url: s.url,
+        site: s.site ?? null,
+        canonicalId: s.canonicalId ?? null,
+        scrapedAt: s.scrapedAt ?? null,
+        scraperName: s.scraperName ?? null,
+        lastError: s.lastError ?? null,
+        meta: s.meta ?? null,
+      }))
+    : null;
 
   const tx = db.transaction(() => {
     db.prepare(
@@ -481,6 +652,10 @@ export function updateSeries(id: string, payload: unknown): Series | null {
         novel_to_read = ?,
         follow_updates = ?,
         preferred_source_type = ?,
+        metadata_source_url = ?,
+        metadata_source_site = ?,
+        metadata_source_canonical_id = ?,
+        metadata_source_updated_at = ?,
         cover_image_blob = COALESCE(?, cover_image_blob),
         cover_image_mime_type = ?,
         cover_image_fetched_at = ?,
@@ -504,6 +679,10 @@ export function updateSeries(id: string, payload: unknown): Series | null {
       merged.novelToRead ? 1 : 0,
       merged.followUpdates ? 1 : 0,
       merged.preferredSourceType,
+      metadataSource.url,
+      metadataSource.site,
+      metadataSource.canonicalId,
+      metadataSource.updatedAt,
       input.coverImageBlob ?? null,
       merged.coverImageMimeType,
       merged.coverImageFetchedAt,
@@ -512,25 +691,28 @@ export function updateSeries(id: string, payload: unknown): Series | null {
       id,
     );
 
-    db.prepare("DELETE FROM series_sources WHERE series_id = ?").run(id);
-    for (const src of sourceEntries) {
-      db.prepare(
+    if (sourceEntries !== null) {
+      db.prepare("DELETE FROM series_sources WHERE series_id = ?").run(id);
+      const insertSource = db.prepare(
         `INSERT INTO series_sources
          (id, series_id, type, url, site, canonical_id, scraped_at, scraper_name, last_error, meta, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        src.id,
-        src.seriesId,
-        src.type,
-        src.url,
-        src.site,
-        src.canonicalId,
-        src.scrapedAt,
-        src.scraperName,
-        src.lastError ? JSON.stringify(src.lastError) : null,
-        src.meta ? JSON.stringify(src.meta) : null,
-        now,
       );
+      for (const src of sourceEntries) {
+        insertSource.run(
+          src.id,
+          src.seriesId,
+          src.type,
+          src.url,
+          src.site,
+          src.canonicalId,
+          src.scrapedAt,
+          src.scraperName,
+          src.lastError ? JSON.stringify(src.lastError) : null,
+          src.meta ? JSON.stringify(src.meta) : null,
+          now,
+        );
+      }
     }
   });
 
@@ -543,7 +725,11 @@ export function updateSeries(id: string, payload: unknown): Series | null {
       finishDate: s.finishDate ?? null,
     })),
     hasCoverImage: input.coverImageBlob ? input.coverImageBlob.length > 0 : merged.hasCoverImage,
-    sources: sourceEntries,
+    metadataSourceUrl: metadataSource.url,
+    metadataSourceSite: metadataSource.site,
+    metadataSourceCanonicalId: metadataSource.canonicalId,
+    metadataSourceUpdatedAt: metadataSource.updatedAt,
+    sources: sourceEntries ?? existing.sources,
     updatedAt: now,
   };
 }
@@ -573,7 +759,17 @@ export function deleteSeries(id: string): boolean {
 export function findSeriesByTitle(title: string): Series | null {
   const db = getDb();
   const row = db
-    .prepare("SELECT * FROM series WHERE LOWER(title) = LOWER(?) LIMIT 1")
+    .prepare(
+      `SELECT id, title, total_chapters, chapters_read, start_date, finish_date, rating,
+              description, personal_notes, status, reread, total_rereads, reread_sessions,
+              novel_to_read, follow_updates, preferred_source_type,
+              cover_image_mime_type, cover_image_fetched_at,
+              metadata_fetched_at, metadata_source_url, metadata_source_site,
+              metadata_source_canonical_id, metadata_source_updated_at,
+              created_at, updated_at,
+              CASE WHEN cover_image_blob IS NOT NULL AND LENGTH(cover_image_blob) > 0 THEN 1 ELSE 0 END AS has_cover_image
+       FROM series WHERE LOWER(title) = LOWER(?) LIMIT 1`,
+    )
     .get(title.trim()) as SeriesRow | undefined;
 
   if (!row) {
@@ -590,14 +786,24 @@ export function findSeriesByCanonicalSource(site: string, canonicalId: string): 
   const db = getDb();
   const row = db
     .prepare(
-      `SELECT s.*
-       FROM series s
-       INNER JOIN series_sources ss ON ss.series_id = s.id
-       WHERE ss.site = ? AND ss.canonical_id = ?
-       ORDER BY s.updated_at DESC
+      `SELECT id, title, total_chapters, chapters_read, start_date, finish_date, rating,
+              description, personal_notes, status, reread, total_rereads, reread_sessions,
+              novel_to_read, follow_updates, preferred_source_type,
+              cover_image_mime_type, cover_image_fetched_at,
+              metadata_fetched_at, metadata_source_url, metadata_source_site,
+              metadata_source_canonical_id, metadata_source_updated_at,
+              created_at, updated_at,
+              CASE WHEN cover_image_blob IS NOT NULL AND LENGTH(cover_image_blob) > 0 THEN 1 ELSE 0 END AS has_cover_image
+       FROM series
+       WHERE id IN (
+         SELECT series_id FROM series_sources WHERE site = ? AND canonical_id = ?
+         UNION
+         SELECT id FROM series WHERE metadata_source_site = ? AND metadata_source_canonical_id = ?
+       )
+       ORDER BY updated_at DESC
        LIMIT 1`,
     )
-    .get(site, canonicalId) as SeriesRow | undefined;
+    .get(site, canonicalId, site, canonicalId) as SeriesRow | undefined;
 
   if (!row) {
     return null;
@@ -621,6 +827,10 @@ function buildMergedPayload(parsed: z.infer<typeof createSeriesSchema>, existing
     totalRereads: existing.totalRereads,
     rereadSessions: existing.rereadSessions,
     preferredSourceType: existing.preferredSourceType,
+    metadataSourceUrl: parsed.metadataSourceUrl ?? existing.metadataSourceUrl,
+    metadataSourceSite: parsed.metadataSourceSite ?? existing.metadataSourceSite,
+    metadataSourceCanonicalId: parsed.metadataSourceCanonicalId ?? existing.metadataSourceCanonicalId,
+    metadataSourceUpdatedAt: parsed.metadataSourceUpdatedAt ?? existing.metadataSourceUpdatedAt,
     sources: [...existing.sources, ...parsed.sources].filter((source, idx, arr) => {
       const key = `${source.site || ""}|${source.canonicalId || ""}|${source.type}|${source.url}`;
       return arr.findIndex((item) => `${item.site || ""}|${item.canonicalId || ""}|${item.type}|${item.url}` === key) === idx;
@@ -644,10 +854,12 @@ export function mergeSeriesByTitle(payload: unknown): { type: "added" | "merged"
 
 export function mergeSeriesByCanonicalOrTitle(payload: unknown): { type: "added" | "merged"; series: Series } {
   const parsed = createSeriesSchema.parse(payload);
-  const canonicalSource = parsed.sources.find((source) => source.site && source.canonicalId);
+  const canonicalSourceFromSources = parsed.sources.find((source) => source.site && source.canonicalId);
+  const canonicalSite = canonicalSourceFromSources?.site ?? parsed.metadataSourceSite ?? null;
+  const canonicalId = canonicalSourceFromSources?.canonicalId ?? parsed.metadataSourceCanonicalId ?? null;
 
-  if (canonicalSource?.site && canonicalSource.canonicalId) {
-    const existingByCanonical = findSeriesByCanonicalSource(canonicalSource.site, canonicalSource.canonicalId);
+  if (canonicalSite && canonicalId) {
+    const existingByCanonical = findSeriesByCanonicalSource(canonicalSite, canonicalId);
     if (existingByCanonical) {
       const nextPayload = buildMergedPayload(parsed, existingByCanonical);
       const updated = updateSeries(existingByCanonical.id, nextPayload);

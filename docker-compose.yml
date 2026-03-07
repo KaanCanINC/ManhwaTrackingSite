@@ -1,19 +1,27 @@
 services:
   manhwa-tracker:
-    build: .
+    image: ghcr.io/kaancaninc/manhwatrackingsite:latest
+    # To build locally instead of pulling: replace the line above with:
+    # build: .
     container_name: manhwa-tracker
     user: "${PUID:-1000}:${PGID:-1000}"
     ports:
-      - "3000:3000"
+      - "${PORT:-3000}:3000"
     environment:
       - NODE_ENV=production
       - DATA_DIR=${DATA_DIR:-/data}
       - DB_DIR=${DB_DIR:-/data/database}
       - BACKUPS_DIR=${BACKUPS_DIR:-/data/backups}
       - IMPORTS_DIR=${IMPORTS_DIR:-/data/imports}
-      - MAX_BACKUPS=60
+      - MAX_BACKUPS=${MAX_BACKUPS:-60}
     volumes:
       - ${HOST_DB_DIR:-/var/lib/casaos/appdata/manhwa-tracker/database}:/data/database
       - ${HOST_BACKUPS_DIR:-/var/lib/casaos/appdata/manhwa-tracker/backups}:/data/backups
       - ${HOST_IMPORTS_DIR:-/var/lib/casaos/appdata/manhwa-tracker/imports}:/data/imports
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/series?limit=1', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s

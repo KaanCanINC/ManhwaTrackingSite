@@ -55,6 +55,9 @@ export async function POST(request: NextRequest) {
     if (error instanceof ZodError) {
       return NextResponse.json({ error: error.flatten() }, { status: 400 });
     }
+    if (error instanceof Error && /metadata source/i.test(error.message)) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     return NextResponse.json({ error: "Unexpected error" }, { status: 500 });
   }
 }
