@@ -81,6 +81,19 @@
 - Updated importer payloads to store MAL/AniList links in metadata source fields instead of injecting provider links into reading sources.
 - Added MAL note entity decoding (`&uuml;`, `&#252;`, etc.) during import parsing.
 - Added enrichment confidence scoring + candidate ranking + canonical-id-first fetch to reduce wrong-title metadata matches.
+- Refactored scraper `ScraperSiteId` from fixed union to string-based host identity to prevent cross-site canonical collisions during multi-domain expansion.
+- Added generic madara/wp-manga parser factory (`src/lib/scrapers/parsers/generic.ts`) and host-normalized registry mapping.
+- Added website domain support batch-1 (17 hosts): `golgebahcesi.com`, `tilkiscans.com`, `nabimanga.com`, `nemesisscans.com`, `nirvanamanga.com`, `paradoxscans.com`, `patimanga.com`, `ragnarscans.com`, `sereinscan.net`, `manga-sehri.net`, `merlintoon.com`, `ruyamanga.net`, `ruyamanga2.com`, `mangahanedanligi.com`, `mangaruhu.com`, `hayalistic.net`, `arcurafansub.com`.
+- Added domain registry unit tests for legacy + batch-1 domains and unsupported domain errors.
+- Updated Vitest config alias resolution (`@ -> src`) to support scraper tests importing app modules.
+- Revalidated quality gates for batch-1 domain rollout (`npm run test`, `npm run lint`; lint has pre-existing warnings only).
+- Updated Add Series modal with cover preview and custom cover upload workflow.
+- Moved synopsis field directly below title in Add Series modal.
+- Added `CUSTOM` preferred source type support across app types/repository/backup validation.
+- Improved scraper quality for problematic sites by enhancing extraction heuristics (JSON-LD parsing, title cleanup, summary extraction, alternative-title filtering, chapter-number parsing).
+- Improved blocked-page detection and Puppeteer challenge retry path for Cloudflare/WAF-style pages.
+- Added scraper utility regression tests (`src/lib/scrapers/html-utils.test.ts`).
+- Revalidated quality gates after UX/scraper improvements (`npm run test`, `npm run build`, `npm run lint` with existing warnings only).
 - Revalidated quality gates after metadata foundation changes (`npm run lint`, `npm run test`, `npm run build`).
 - Revalidated quality gates after website import wiring (`npm run lint`, `npm run test`, `npm run build`).
 - Revalidated quality gates after manual source scrape UX changes (`npm run lint`, `npm run test`, `npm run build`).
@@ -98,3 +111,5 @@
 - Expand automated tests for backup rotation and repository edge cases.
 - Add dedicated import/export UI workflow with file uploads.
 - Add optional Google Drive backup integration in v2.
+- Continue scraper domain rollout in additional batches for remaining requested hosts:
+	`adumanga.com`, `afroditscans.com`, `alucardscans.com`, `eldermanga.com`, `eskimangalar.com`, `mangadiyari.com`, `mangakings.com.tr`, `raindropteamfan.com`, `hivetoons.org`, `uzaymanga.com`, `trwebtoon.com`, `mangagezgini.love`, `flamecomics.xyz`, `manhuaplus.org`, `vortexscans.org`, `roliascan.com`, `demonicscans.org`, `utoon.net`, `vortexmanga.com`.

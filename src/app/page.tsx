@@ -10,6 +10,7 @@ import {
   coverGradient,
   ensureSessionCount,
   formatStatus,
+  getLibrarySourceLinks,
   getPreferredSource,
   normalizeRereadSessions,
   parseSourceMeta,
@@ -185,6 +186,10 @@ function MangaCard({
     site: item.metadataSourceSite,
     canonicalId: item.metadataSourceCanonicalId,
   });
+  const sourceLinks = getLibrarySourceLinks(item.sources, {
+    url: item.metadataSourceUrl,
+    site: item.metadataSourceSite,
+  });
   const preferredMeta = parseSourceMeta(preferredSource);
   const progress =
     item.totalChapters > 0 ? Math.round((item.chaptersRead / item.totalChapters) * 100) : 0;
@@ -280,14 +285,16 @@ function MangaCard({
               >
                 +1
               </button>
-              {preferredSource && (
+              {sourceLinks.map((sourceLink) => (
                 <button
-                  onClick={(e) => act(e, () => window.open(preferredSource.url, "_blank", "noopener,noreferrer"))}
+                  key={`${item.id}-${sourceLink.label}`}
+                  onClick={(e) => act(e, () => window.open(sourceLink.url, "_blank", "noopener,noreferrer"))}
                   className="rounded bg-orange-600/80 px-2 py-0.5 text-xs text-white backdrop-blur hover:bg-orange-500 transition-colors"
+                  title={sourceLink.title}
                 >
-                  {preferredSource.type}
+                  {sourceLink.label}
                 </button>
-              )}
+              ))}
               <button
                 onClick={(e) => act(e, () => onDelete(item.id))}
                 className="rounded bg-red-700/60 p-1 text-white backdrop-blur hover:bg-red-600 transition-colors"
@@ -312,10 +319,9 @@ function MangaListRow({
   onChapter: (id: string, delta: number) => void;
   onDelete: (id: string) => void;
 }) {
-  const preferredSource = getPreferredSource(item.sources, item.preferredSourceType, {
+  const sourceLinks = getLibrarySourceLinks(item.sources, {
     url: item.metadataSourceUrl,
     site: item.metadataSourceSite,
-    canonicalId: item.metadataSourceCanonicalId,
   });
   const progress = item.totalChapters > 0 ? Math.round((item.chaptersRead / item.totalChapters) * 100) : 0;
   const isEnriching = item.enrichmentStatus === "pending" || item.enrichmentStatus === "running";
@@ -391,14 +397,16 @@ function MangaListRow({
               >
                 +1
               </button>
-              {preferredSource && (
+              {sourceLinks.map((sourceLink) => (
                 <button
-                  onClick={(e) => act(e, () => window.open(preferredSource.url, "_blank", "noopener,noreferrer"))}
+                  key={`${item.id}-list-${sourceLink.label}`}
+                  onClick={(e) => act(e, () => window.open(sourceLink.url, "_blank", "noopener,noreferrer"))}
                   className="rounded bg-orange-600/80 px-2 py-0.5 text-xs text-white hover:bg-orange-500"
+                  title={sourceLink.title}
                 >
-                  {preferredSource.type}
+                  {sourceLink.label}
                 </button>
-              )}
+              ))}
               <button
                 onClick={(e) => act(e, () => onDelete(item.id))}
                 className="rounded bg-red-700/70 px-2 py-0.5 text-xs text-white hover:bg-red-600"
@@ -420,6 +428,7 @@ function AddSeriesModal({ onClose, onAdded, onNotify }: { onClose: () => void; o
   const [sourceMetaOverrides, setSourceMetaOverrides] =
     useState<Partial<Record<SourceType, SourceMetaOverride>>>({});
   const [error, setError] = useState<string | null>(null);
+  const coverInputRef = useRef<HTMLInputElement | null>(null);
 
   function f<K extends keyof FormState>(key: K, val: FormState[K]) {
     setForm((prev) => ({ ...prev, [key]: val }));
@@ -524,6 +533,8 @@ function AddSeriesModal({ onClose, onAdded, onNotify }: { onClose: () => void; o
         ? sources.some((source) => source?.site === "myanimelist")
         : form.preferredSourceType === "ANILIST"
           ? sources.some((source) => source?.site === "anilist")
+          : form.preferredSourceType === "CUSTOM"
+            ? sources.length > 0
           : sources.some((source) => source?.type === form.preferredSourceType)
       : false;
 
@@ -569,6 +580,59 @@ function AddSeriesModal({ onClose, onAdded, onNotify }: { onClose: () => void; o
   const inputCls =
     "w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none focus:border-blue-500 transition-colors";
   const labelCls = "block text-xs text-gray-400 mb-1.5";
+  const coverPreviewSrc =
+    form.coverImageBase64 && form.coverImageMimeType
+      ? `data:${form.coverImageMimeType};base64,${form.coverImageBase64}`
+      : null;
+
+  async function setCustomCover(file: File | null) {
+    if (!file) {
+      return;
+    }
+    if (!file.type.startsWith("image/")) {
+      setError("Custom cover must be an image file.");
+      return;
+    }
+
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === "string") {
+          resolve(reader.result);
+          return;
+        }
+        reject(new Error("Failed to read image file."));
+      };
+      reader.onerror = () => reject(reader.error || new Error("Failed to read image file."));
+      reader.readAsDataURL(file);
+    });
+
+    const base64 = dataUrl.split(",")[1] || null;
+    if (!base64) {
+      setError("Failed to parse custom cover image.");
+      return;
+    }
+
+    setForm((prev) => ({
+      ...prev,
+      coverImageBase64: base64,
+      coverImageMimeType: file.type,
+      coverImageFetchedAt: new Date().toISOString(),
+    }));
+    setError(null);
+  }
+
+  function clearCustomCover() {
+    setForm((prev) => ({
+      ...prev,
+      coverImageBase64: null,
+      coverImageMimeType: null,
+      coverImageFetchedAt: null,
+    }));
+    if (coverInputRef.current) {
+      coverInputRef.current.value = "";
+    }
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm sm:items-center p-4">
@@ -584,6 +648,66 @@ function AddSeriesModal({ onClose, onAdded, onNotify }: { onClose: () => void; o
           <div className="sm:col-span-2">
             <label className={labelCls}>Title *</label>
             <input required value={form.title} onChange={(e) => f("title", e.target.value)} className={inputCls} />
+          </div>
+
+          <div className="sm:col-span-2">
+            <label className={labelCls}>Synopsis (auto-filled from source)</label>
+            <textarea
+              rows={3}
+              value={form.description}
+              onChange={(e) => f("description", e.target.value)}
+              placeholder="Source synopsis..."
+              className="w-full resize-none rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none focus:border-blue-500 transition-colors"
+            />
+          </div>
+
+          <div className="sm:col-span-2">
+            <label className={labelCls}>Cover Preview</label>
+            <div className="flex flex-wrap items-start gap-4 rounded-lg border border-gray-800 bg-gray-900/60 p-3">
+              <div className="relative h-40 w-28 overflow-hidden rounded-md border border-gray-700" style={{ background: coverGradient(form.title || "Cover") }}>
+                {coverPreviewSrc ? (
+                  <Image
+                    src={coverPreviewSrc}
+                    alt="Selected cover preview"
+                    fill
+                    unoptimized
+                    className="object-cover"
+                  />
+                ) : (
+                  <div className="flex h-full items-center justify-center text-center text-xs text-gray-300">
+                    No cover
+                  </div>
+                )}
+              </div>
+
+              <div className="flex min-w-56 flex-1 flex-col gap-2">
+                <input
+                  ref={coverInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => void setCustomCover(e.target.files?.[0] ?? null)}
+                  className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 file:mr-3 file:rounded file:border-0 file:bg-blue-600 file:px-2 file:py-1 file:text-xs file:text-white"
+                />
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => coverInputRef.current?.click()}
+                    className="rounded-lg border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:border-blue-500 hover:text-white"
+                  >
+                    Add Custom Cover
+                  </button>
+                  <button
+                    type="button"
+                    onClick={clearCustomCover}
+                    disabled={!coverPreviewSrc}
+                    className="rounded-lg border border-gray-700 px-3 py-1.5 text-xs text-gray-300 hover:text-white disabled:opacity-50"
+                  >
+                    Clear Cover
+                  </button>
+                </div>
+                <p className="text-[11px] text-gray-500">Source cover is shown after metadata fetch; custom upload overrides it.</p>
+              </div>
+            </div>
           </div>
 
           <div>
@@ -647,6 +771,7 @@ function AddSeriesModal({ onClose, onAdded, onNotify }: { onClose: () => void; o
               <option value="">Auto</option>
               <option value="TR">TR</option>
               <option value="EN">EN</option>
+              <option value="CUSTOM">Custom</option>
             </select>
           </div>
 
@@ -697,17 +822,6 @@ function AddSeriesModal({ onClose, onAdded, onNotify }: { onClose: () => void; o
               value={form.totalRereads}
               onChange={(e) => updateRereadCount(Number(e.target.value))}
               className={inputCls}
-            />
-          </div>
-
-          <div className="sm:col-span-2">
-            <label className={labelCls}>Synopsis (auto-filled from source)</label>
-            <textarea
-              rows={3}
-              value={form.description}
-              onChange={(e) => f("description", e.target.value)}
-              placeholder="Source synopsis..."
-              className="w-full resize-none rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none focus:border-blue-500 transition-colors"
             />
           </div>
 
@@ -1660,7 +1774,7 @@ export default function Home() {
                 alt="Panel Shelf logo"
                 width={52}
                 height={52}
-                className="h-30 w-30 rounded-md object-cover"
+                className="h-20 w-20 rounded-md object-cover"
                 priority
               />
               <span>My Library</span>

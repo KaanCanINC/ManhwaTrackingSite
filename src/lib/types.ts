@@ -1,6 +1,6 @@
 export type SeriesStatus = "plan_to_read" | "reading" | "completed" | "dropped" | "up_to_date";
 export type SourceType = "TR" | "EN";
-export type PreferredSourceType = SourceType | "MAL" | "ANILIST";
+export type PreferredSourceType = SourceType | "MAL" | "ANILIST" | "CUSTOM";
 export type MetadataSourceSite = "myanimelist" | "anilist";
 
 export interface SourceErrorInfo {

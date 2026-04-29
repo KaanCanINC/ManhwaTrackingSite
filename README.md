@@ -60,6 +60,85 @@ Optional UID/GID override:
 PUID=1000 PGID=1000 docker compose up -d --build
 ```
 
+You can set the image path explicitly (recommended for GitHub packages):
+
+```bash
+IMAGE=ghcr.io/<github-user-or-org>/<repo>:latest docker compose up -d
+```
+
+## GitHub Push + GHCR Release Flow
+
+1. Ensure your default branch is `main` and this workflow exists:
+	- `.github/workflows/docker.yml`
+2. Push code to GitHub:
+
+```bash
+git add .
+git commit -m "release: prepare casaos deployment"
+git push origin main
+```
+
+3. The workflow builds and pushes image tags to GHCR automatically:
+	- `latest` for default branch
+	- `sha-<commit>` for traceable immutable images
+	- `v*` tags when you create version tags
+
+Optional version release:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+4. In GitHub, verify package visibility if needed:
+	- Repository -> Packages -> container image
+	- Set visibility according to your usage (`public` for easy pull)
+
+## CasaOS Install Steps
+
+1. In CasaOS terminal, create project folder and copy files:
+
+```bash
+mkdir -p /DATA/AppData/manhwa-tracker
+cd /DATA/AppData/manhwa-tracker
+```
+
+2. Place these files in that folder:
+	- `docker-compose.yml`
+	- `.env` (based on `.env.example`)
+
+3. Create and edit `.env`:
+
+```bash
+cp .env.example .env
+```
+
+Required values to review:
+	- `IMAGE` (your GHCR path)
+	- `HOST_DB_DIR`, `HOST_BACKUPS_DIR`, `HOST_IMPORTS_DIR`
+	- `PUID`, `PGID`
+	- `PORT`
+
+4. Start service:
+
+```bash
+docker compose up -d
+```
+
+5. Update to newest image later:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+6. Check health:
+
+```bash
+docker ps
+docker logs -f manhwa-tracker
+```
+
 ## Migration from `./data` (Old Layout)
 
 If you previously used `./data:/data` mount, migrate once:

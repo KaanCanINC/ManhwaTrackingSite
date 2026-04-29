@@ -202,7 +202,7 @@ const backupSeriesSchema = z.object({
     .default([]),
   novelToRead: z.boolean().default(false),
   followUpdates: z.boolean().default(false),
-  preferredSourceType: z.enum(["TR", "EN", "MAL", "ANILIST"]).nullable().default(null),
+  preferredSourceType: z.enum(["TR", "EN", "MAL", "ANILIST", "CUSTOM"]).nullable().default(null),
   metadataFetchedAt: z.string().nullable().optional(),
   metadataSourceUrl: z.string().url().nullable().optional(),
   metadataSourceSite: z.enum(["myanimelist", "anilist"]).nullable().optional(),

@@ -120,10 +120,57 @@ export function getPreferredSource(
                 meta: null,
               }
             : null
-          : sources.find((source) => source.type === preferredSourceType);
+          : preferredSourceType === "CUSTOM"
+            ? sources[0] || null
+            : sources.find((source) => source.type === preferredSourceType);
     if (match) return match;
   }
   return sources.find((source) => source.type === "TR") || sources.find((source) => source.type === "EN") || null;
+}
+
+export type LibrarySourceLink = {
+  label: "TR" | "EN" | "MAL" | "ANILIST";
+  url: string;
+  title: string;
+};
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+export function getLibrarySourceLinks(
+  sources: SeriesSource[],
+  metadataSource?: {
+    url: string | null;
+    site: MetadataSourceSite | null;
+  },
+): LibrarySourceLink[] {
+  const links: LibrarySourceLink[] = [];
+
+  const tr = sources.find((source) => source.type === "TR" && isHttpUrl(source.url));
+  if (tr) {
+    links.push({ label: "TR", url: tr.url, title: "Open Turkish source" });
+  }
+
+  const en = sources.find((source) => source.type === "EN" && isHttpUrl(source.url));
+  if (en) {
+    links.push({ label: "EN", url: en.url, title: "Open English source" });
+  }
+
+  if (metadataSource?.site === "myanimelist" && metadataSource.url && isHttpUrl(metadataSource.url)) {
+    links.push({ label: "MAL", url: metadataSource.url, title: "Open MyAnimeList" });
+  }
+
+  if (metadataSource?.site === "anilist" && metadataSource.url && isHttpUrl(metadataSource.url)) {
+    links.push({ label: "ANILIST", url: metadataSource.url, title: "Open AniList" });
+  }
+
+  return links;
 }
 
 type ParsedSourceMeta = {

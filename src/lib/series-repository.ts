@@ -49,7 +49,7 @@ const baseSeriesSchema = z.object({
   rereadSessions: z.array(rereadSessionSchema).default([]),
   novelToRead: z.boolean().default(false),
   followUpdates: z.boolean().default(false),
-  preferredSourceType: z.enum(["TR", "EN", "MAL", "ANILIST"]).nullable().default(null),
+  preferredSourceType: z.enum(["TR", "EN", "MAL", "ANILIST", "CUSTOM"]).nullable().default(null),
   coverImageBlob: z.instanceof(Uint8Array).nullable().optional(),
   coverImageMimeType: z.string().trim().min(1).nullable().optional(),
   coverImageFetchedAt: z.string().datetime().nullable().optional(),

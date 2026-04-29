@@ -1,6 +1,6 @@
 import type { SourceType } from "@/lib/types";
 
-export type ScraperSiteId = "asuracomic" | "manhuaus" | "asurascans-tr";
+export type ScraperSiteId = string;
 
 export interface ScrapedSeriesMetadata {
   title: string;

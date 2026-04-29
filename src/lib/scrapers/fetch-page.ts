@@ -16,7 +16,12 @@ function isLikelyBlocked(status: number, html: string): boolean {
     lowered.includes("cloudflare") ||
     lowered.includes("attention required") ||
     lowered.includes("checking your browser") ||
-    lowered.includes("ddos protection")
+    lowered.includes("ddos protection") ||
+    lowered.includes("just a moment") ||
+    lowered.includes("security verification") ||
+    lowered.includes("verifying that you are not a robot") ||
+    lowered.includes("protected by waf security shield") ||
+    lowered.includes("initializing security check")
   );
 }
 
@@ -56,7 +61,19 @@ async function fetchWithPuppeteer(url: string, timeoutMs: number): Promise<{ fin
       "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     );
     await page.goto(url, { waitUntil: "networkidle2", timeout: timeoutMs });
-    const html = await page.content();
+
+    let html = await page.content();
+    // Some challenge pages return 200 first and then redirect after JS execution.
+    if (isLikelyBlocked(200, html)) {
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      html = await page.content();
+      if (isLikelyBlocked(200, html)) {
+        await page.reload({ waitUntil: "networkidle2", timeout: timeoutMs });
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        html = await page.content();
+      }
+    }
+
     return { finalUrl: page.url(), html };
   } finally {
     await browser.close();

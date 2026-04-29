@@ -17,9 +17,13 @@ export const parseManhuaUs: SiteScraper = ({ finalUrl, html }) => {
     throw new Error("Unable to parse title for manhuaus");
   }
 
+  const description = extractDescription(html);
+  const normalizedTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const normalizedDescription = description.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
   return {
     title,
-    description: extractDescription(html),
+    description: normalizedDescription === normalizedTitle ? "" : description,
     coverImageUrl: extractCoverImageUrl(html),
     tags: extractTags(html),
     alternativeTitles: extractAlternativeTitles(html),

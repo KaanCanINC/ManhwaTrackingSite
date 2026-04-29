@@ -5,6 +5,7 @@
 - Preserve strict two-column detail layout (left cover, right metadata/editor).
 - Maintain lint/build/test clean status while iterating on tracking features.
 - Implement persistent scraped metadata so title/description/cover survive source-site downtime.
+- Expand website domain support in controlled batches (implement -> test -> document) instead of one-shot bulk changes.
 
 ## Recent Decisions
 - Stack: Next.js full-stack, SQLite.
@@ -81,3 +82,18 @@
 - Updated MAL/AniList importers to stop writing provider links into reading sources; provider links now populate metadata-source fields.
 - Added MAL notes HTML-entity decoding for import comments (`&uuml;` and numeric entities).
 - Added enrichment hardening with confidence scoring, multi-candidate selection, canonical-id-first lookups, and low-confidence skip reasons.
+- Refactored scraper domain identity to be host-based (`ScraperSiteId = string`) so each website can have a unique canonical merge namespace.
+- Added generic site parser factory for madara/wp-manga style pages to scale domain onboarding safely.
+- Completed scraper domain support batch-1 (17 hosts): `golgebahcesi.com`, `tilkiscans.com`, `nabimanga.com`, `nemesisscans.com`, `nirvanamanga.com`, `paradoxscans.com`, `patimanga.com`, `ragnarscans.com`, `sereinscan.net`, `manga-sehri.net`, `merlintoon.com`, `ruyamanga.net`, `ruyamanga2.com`, `mangahanedanligi.com`, `mangaruhu.com`, `hayalistic.net`, `arcurafansub.com`.
+- Added `src/lib/scrapers/domain-registry.test.ts` to lock host normalization and unsupported-domain behavior.
+- Updated Add Series modal UX:
+- Added cover preview box and custom cover upload (image file -> base64) with clear action.
+- Moved `Synopsis` field directly below `Title`.
+- Added `Custom` option to `Preferred Library Source` and backend schema support.
+- Improved scraper extraction quality:
+- Added JSON-LD title/description/image parsing fallback.
+- Added stronger title sanitizer for common Turkish site suffix noise.
+- Added summary block extraction to avoid SEO boilerplate descriptions.
+- Improved alternative-title filtering to skip noisy template fragments.
+- Expanded total-chapter parsing for `Bölüm/Bolum/Chapter/Episode` URL/text patterns.
+- Improved challenge detection/fallback (`Just a moment`, WAF verification pages) with additional Puppeteer wait/reload pass.

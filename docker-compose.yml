@@ -1,9 +1,10 @@
 services:
   manhwa-tracker:
-    image: ghcr.io/kaancaninc/manhwatrackingsite:latest
+    image: ${IMAGE:-ghcr.io/kaancaninc/manhwatrackingsite:latest}
     # To build locally instead of pulling: replace the line above with:
     # build: .
     container_name: manhwa-tracker
+    pull_policy: always
     user: "${PUID:-1000}:${PGID:-1000}"
     ports:
       - "${PORT:-3000}:3000"
