@@ -16,6 +16,11 @@ const monoFont = IBM_Plex_Mono({
 export const metadata: Metadata = {
   title: "Panel Shelf",
   description: "Self-hosted manhwa tracking dashboard",
+  icons: {
+    icon: "/logo.png",
+    apple: "/logo.png",
+    shortcut: "/logo.png",
+  },
 };
 
 export default function RootLayout({

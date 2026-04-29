@@ -1654,7 +1654,17 @@ export default function Home() {
 
         <div className="mb-8 flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h1 className="mb-2 text-3xl font-medium sm:text-4xl">My Library</h1>
+            <h1 className="mb-2 flex items-center gap-3 text-3xl font-medium sm:text-4xl">
+              <Image
+                src="/logo.png"
+                alt="Panel Shelf logo"
+                width={52}
+                height={52}
+                className="h-30 w-30 rounded-md object-cover"
+                priority
+              />
+              <span>My Library</span>
+            </h1>
             <p className="text-gray-400">Track your manga and manhwa reading progress</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
