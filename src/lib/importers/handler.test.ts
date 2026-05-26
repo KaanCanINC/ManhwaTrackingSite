@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ImportSeriesInput } from "@/lib/importers/mal";
 
 const mocks = vi.hoisted(() => {
-  const writeFileSyncMock = vi.fn();
+  const writeFileMock = vi.fn();
   const runImportInsertMock = vi.fn();
   const prepareMock = vi.fn(() => ({ run: runImportInsertMock }));
   const getDbMock = vi.fn(() => ({ prepare: prepareMock }));
@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => {
   }));
 
   return {
-    writeFileSyncMock,
+    writeFileMock,
     runImportInsertMock,
     prepareMock,
     getDbMock,
@@ -22,10 +22,8 @@ const mocks = vi.hoisted(() => {
   };
 });
 
-vi.mock("node:fs", () => ({
-  default: {
-    writeFileSync: mocks.writeFileSyncMock,
-  },
+vi.mock("node:fs/promises", () => ({
+  writeFile: mocks.writeFileMock,
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -110,7 +108,7 @@ describe("import-handler", () => {
     expect(mocks.enqueueImportEnrichmentJobsMock).not.toHaveBeenCalled();
     expect(mergeStrategy).toHaveBeenCalledTimes(1);
     expect(mergeStrategy).toHaveBeenCalledWith([makeItem("A"), makeItem("C")]);
-    expect(mocks.writeFileSyncMock).toHaveBeenCalledTimes(1);
+    expect(mocks.writeFileMock).toHaveBeenCalledTimes(1);
     expect(mocks.prepareMock).toHaveBeenCalledWith(
       "INSERT INTO imports (id, source, file_name, added, merged, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     );

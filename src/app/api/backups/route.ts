@@ -4,10 +4,10 @@ import { createBackup, listBackups } from "@/lib/backup-service";
 export const runtime = "nodejs";
 
 export async function POST() {
-  const result = createBackup("manual");
+  const result = await createBackup("manual");
   return NextResponse.json({ data: result }, { status: 201 });
 }
 
 export async function GET() {
-  return NextResponse.json({ data: listBackups() });
+  return NextResponse.json({ data: await listBackups() });
 }

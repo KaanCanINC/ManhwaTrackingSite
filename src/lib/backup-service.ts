@@ -1,10 +1,23 @@
-import fs from "node:fs";
+import { constants as fsConstants } from "node:fs";
+import {
+  access,
+  readFile,
+  readdir,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { dataPaths } from "@/lib/db/storage";
 import { getDb } from "@/lib/db";
 import { listSeries } from "@/lib/series-repository";
+import type {
+  BackupListItem,
+  BackupRestorePreview,
+  BackupRestoreResult,
+} from "@/lib/contracts";
 
 function maxBackups(): number {
   const parsed = Number(process.env.MAX_BACKUPS || "60");
@@ -14,7 +27,7 @@ function maxBackups(): number {
   return parsed;
 }
 
-export function createBackup(reason: string): { fileName: string; path: string } {
+export async function createBackup(reason: string): Promise<{ fileName: string; path: string }> {
   const db = getDb();
   const snapshot = {
     createdAt: new Date().toISOString(),
@@ -25,7 +38,7 @@ export function createBackup(reason: string): { fileName: string; path: string }
   const fileName = `backup-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}.json`;
   const filePath = path.join(dataPaths.backupsDir, fileName);
 
-  fs.writeFileSync(filePath, JSON.stringify(snapshot), "utf8");
+  await writeFile(filePath, JSON.stringify(snapshot), "utf8");
 
   db.prepare("INSERT INTO backups (id, file_name, reason, created_at) VALUES (?, ?, ?, ?)").run(
     randomUUID(),
@@ -34,26 +47,25 @@ export function createBackup(reason: string): { fileName: string; path: string }
     snapshot.createdAt,
   );
 
-  rotateBackups();
+  await rotateBackups();
   return { fileName, path: filePath };
 }
 
-function rotateBackups(): void {
-  const files = fs
-    .readdirSync(dataPaths.backupsDir)
+async function rotateBackups(): Promise<void> {
+  const files = (await readdir(dataPaths.backupsDir))
     .filter((f) => f.endsWith(".json"))
     .sort()
     .reverse();
 
   const limit = maxBackups();
   for (const file of files.slice(limit)) {
-    fs.unlinkSync(path.join(dataPaths.backupsDir, file));
+    await unlink(path.join(dataPaths.backupsDir, file));
   }
 }
 
 let dailyBackupCheckedDate = "";
 
-export function runDailyBackupIfNeeded(): { created: boolean; fileName?: string } {
+export async function runDailyBackupIfNeeded(): Promise<{ created: boolean; fileName?: string }> {
   const today = new Date().toISOString().slice(0, 10);
   if (dailyBackupCheckedDate === today) {
     return { created: false };
@@ -71,7 +83,7 @@ export function runDailyBackupIfNeeded(): { created: boolean; fileName?: string 
     return { created: false };
   }
 
-  const backup = createBackup("daily");
+  const backup = await createBackup("daily");
   dailyBackupCheckedDate = today;
   return { created: true, fileName: backup.fileName };
 }
@@ -79,34 +91,27 @@ export function runDailyBackupIfNeeded(): { created: boolean; fileName?: string 
 let lastChangeBackupAt = 0;
 const CHANGE_BACKUP_COOLDOWN_MS = 15 * 60 * 1000;
 
-export function createChangeBackupIfCooledDown(): void {
+export async function createChangeBackupIfCooledDown(): Promise<void> {
+  await runDailyBackupIfNeeded();
   const now = Date.now();
   if (now - lastChangeBackupAt < CHANGE_BACKUP_COOLDOWN_MS) {
     return;
   }
   lastChangeBackupAt = now;
-  createBackup("change");
+  await createBackup("change");
 }
 
-export type BackupListItem = {
-  id: string;
-  fileName: string;
-  reason: string;
-  createdAt: string;
-  sizeBytes: number;
-};
-
-export function listBackups(): BackupListItem[] {
+export async function listBackups(): Promise<BackupListItem[]> {
   const db = getDb();
   const rows = db
     .prepare("SELECT id, file_name, reason, created_at FROM backups ORDER BY created_at DESC")
     .all() as Array<{ id: string; file_name: string; reason: string; created_at: string }>;
 
-  return rows.map((row) => {
+  return Promise.all(rows.map(async (row) => {
     const fullPath = path.join(dataPaths.backupsDir, row.file_name);
     let sizeBytes = 0;
     try {
-      sizeBytes = fs.statSync(fullPath).size;
+      sizeBytes = (await stat(fullPath)).size;
     } catch {
       sizeBytes = 0;
     }
@@ -118,10 +123,12 @@ export function listBackups(): BackupListItem[] {
       createdAt: row.created_at,
       sizeBytes,
     };
-  });
+  }));
 }
 
-export function getBackupFileById(id: string): { fileName: string; fullPath: string } | null {
+export async function getBackupFileById(
+  id: string,
+): Promise<{ fileName: string; fullPath: string } | null> {
   const db = getDb();
   const row = db
     .prepare("SELECT file_name FROM backups WHERE id = ? LIMIT 1")
@@ -132,7 +139,9 @@ export function getBackupFileById(id: string): { fileName: string; fullPath: str
   }
 
   const fullPath = path.join(dataPaths.backupsDir, row.file_name);
-  if (!fs.existsSync(fullPath)) {
+  try {
+    await access(fullPath, fsConstants.F_OK);
+  } catch {
     return null;
   }
 
@@ -142,7 +151,7 @@ export function getBackupFileById(id: string): { fileName: string; fullPath: str
   };
 }
 
-export function deleteBackupById(id: string): boolean {
+export async function deleteBackupById(id: string): Promise<boolean> {
   const db = getDb();
   const row = db
     .prepare("SELECT file_name FROM backups WHERE id = ? LIMIT 1")
@@ -153,8 +162,10 @@ export function deleteBackupById(id: string): boolean {
   }
 
   const fullPath = path.join(dataPaths.backupsDir, row.file_name);
-  if (fs.existsSync(fullPath)) {
-    fs.unlinkSync(fullPath);
+  try {
+    await unlink(fullPath);
+  } catch {
+    // Keep behavior tolerant when file is already gone.
   }
 
   const result = db.prepare("DELETE FROM backups WHERE id = ?").run(id);
@@ -190,6 +201,7 @@ const backupSeriesSchema = z.object({
   description: z.string().default(""),
   personalNotes: z.string().default(""),
   status: z.enum(["plan_to_read", "reading", "completed", "dropped", "up_to_date"]),
+  contentType: z.enum(["MANHWA", "MANHUA", "MANGA"]).nullable().default(null),
   reread: z.boolean().default(false),
   totalRereads: z.number().int().min(0).default(0),
   rereadSessions: z
@@ -221,32 +233,15 @@ const backupSnapshotSchema = z.object({
 
 type BackupSnapshot = z.infer<typeof backupSnapshotSchema>;
 
-export type BackupRestorePreview = {
-  backupId: string;
-  backupFileName: string;
-  snapshotCreatedAt: string;
-  totalInBackup: number;
-  totalCurrent: number;
-  toAdd: number;
-  toUpdate: number;
-  toDelete: number;
-};
-
-export type BackupRestoreResult = {
-  backupId: string;
-  restoredSeries: number;
-  restoredSources: number;
-  deletedSeries: number;
-  preRestoreBackupFileName: string;
-};
-
-function loadBackupSnapshotById(backupId: string): { fileName: string; snapshot: BackupSnapshot } {
-  const backup = getBackupFileById(backupId);
+async function loadBackupSnapshotById(
+  backupId: string,
+): Promise<{ fileName: string; snapshot: BackupSnapshot }> {
+  const backup = await getBackupFileById(backupId);
   if (!backup) {
     throw new Error("Backup not found");
   }
 
-  const raw = fs.readFileSync(backup.fullPath, "utf8");
+  const raw = await readFile(backup.fullPath, "utf8");
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -265,8 +260,8 @@ function loadBackupSnapshotById(backupId: string): { fileName: string; snapshot:
   };
 }
 
-export function previewRestoreByBackupId(backupId: string): BackupRestorePreview {
-  const loaded = loadBackupSnapshotById(backupId);
+export async function previewRestoreByBackupId(backupId: string): Promise<BackupRestorePreview> {
+  const loaded = await loadBackupSnapshotById(backupId);
   const db = getDb();
 
   const currentRows = db.prepare("SELECT id FROM series").all() as Array<{ id: string }>;
@@ -302,9 +297,9 @@ export function previewRestoreByBackupId(backupId: string): BackupRestorePreview
   };
 }
 
-export function restoreByBackupId(backupId: string): BackupRestoreResult {
-  const loaded = loadBackupSnapshotById(backupId);
-  const preRestore = createBackup(`pre-restore:${loaded.fileName}`);
+export async function restoreByBackupId(backupId: string): Promise<BackupRestoreResult> {
+  const loaded = await loadBackupSnapshotById(backupId);
+  const preRestore = await createBackup(`pre-restore:${loaded.fileName}`);
   const db = getDb();
 
   const currentRows = db.prepare("SELECT id FROM series").all() as Array<{ id: string }>;
@@ -316,12 +311,12 @@ export function restoreByBackupId(backupId: string): BackupRestoreResult {
     const insertSeries = db.prepare(
       `INSERT INTO series (
           id, title, total_chapters, chapters_read, start_date, finish_date, rating,
-          description, personal_notes, status, reread, total_rereads, reread_sessions,
+          description, personal_notes, status, content_type, reread, total_rereads, reread_sessions,
           novel_to_read, follow_updates, preferred_source_type,
           metadata_source_url, metadata_source_site, metadata_source_canonical_id, metadata_source_updated_at,
           cover_image_blob, cover_image_mime_type, cover_image_fetched_at, metadata_fetched_at,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const insertSource = db.prepare(
       `INSERT INTO series_sources
@@ -343,6 +338,7 @@ export function restoreByBackupId(backupId: string): BackupRestoreResult {
         item.description,
         item.personalNotes,
         item.status,
+        item.contentType ?? null,
         item.reread ? 1 : 0,
         item.totalRereads,
         JSON.stringify(item.rereadSessions),

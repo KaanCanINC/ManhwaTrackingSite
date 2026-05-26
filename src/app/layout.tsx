@@ -14,8 +14,8 @@ const monoFont = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Panel Shelf",
-  description: "Self-hosted manhwa tracking dashboard",
+  title: "ManCon",
+  description: "Self-hosted manhwa and manga tracking dashboard",
   icons: {
     icon: "/logo.png",
     apple: "/logo.png",
@@ -29,7 +29,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body className={`${displayFont.variable} ${monoFont.variable} antialiased`}>
         {children}
       </body>

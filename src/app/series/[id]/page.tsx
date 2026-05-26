@@ -24,6 +24,7 @@ type FormState = {
   totalChapters: number;
   chaptersRead: number;
   status: Status;
+  contentType: "MANHWA" | "MANHUA" | "MANGA" | null;
   rating: number | "";
   description: string;
   personalNotes: string;
@@ -85,6 +86,7 @@ function formFromSeries(series: Series): FormState {
     totalChapters: series.totalChapters,
     chaptersRead: series.chaptersRead,
     status: series.status,
+    contentType: series.contentType,
     rating: series.rating ?? "",
     description: series.description ?? "",
     personalNotes: series.personalNotes,
@@ -364,6 +366,7 @@ export default function SeriesDetailPage() {
           totalChapters: clampInt(form.totalChapters),
           chaptersRead: clampInt(form.chaptersRead),
           status: form.status,
+          contentType: form.contentType,
           rating: form.rating === "" ? null : Number(form.rating),
           description: form.description,
           personalNotes: form.personalNotes,
@@ -514,6 +517,11 @@ export default function SeriesDetailPage() {
                   <Star className="h-4 w-4 fill-current" />
                   <span>{form.rating === "" ? "Not rated" : `${form.rating} / 10`}</span>
                 </div>
+                {form.contentType && (
+                  <span className="rounded-full border border-blue-500/50 bg-blue-900/50 px-2 py-0.5 text-xs font-medium text-blue-200">
+                    {form.contentType === "MANHWA" ? "Manhwa" : form.contentType === "MANHUA" ? "Manhua" : "Manga"}
+                  </span>
+                )}
                 <div className="flex items-center gap-1 text-gray-300">
                   <BookOpen className="h-4 w-4" />
                   <span>
@@ -584,6 +592,20 @@ export default function SeriesDetailPage() {
                         {option.label}
                       </option>
                     ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className={labelCls}>Series Type</label>
+                  <select
+                    value={form.contentType || ""}
+                    onChange={(e) => f("contentType", (e.target.value || null) as FormState["contentType"])}
+                    className={inputCls}
+                  >
+                    <option value="">Not set</option>
+                    <option value="MANHWA">Manhwa</option>
+                    <option value="MANHUA">Manhua</option>
+                    <option value="MANGA">Manga</option>
                   </select>
                 </div>
 

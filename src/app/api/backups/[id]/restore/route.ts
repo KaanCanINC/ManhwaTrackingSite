@@ -19,7 +19,7 @@ export async function POST(request: Request, { params }: Params) {
   const { id } = await params;
 
   try {
-    const result = restoreByBackupId(id);
+    const result = await restoreByBackupId(id);
     return NextResponse.json({ data: result });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Restore failed";

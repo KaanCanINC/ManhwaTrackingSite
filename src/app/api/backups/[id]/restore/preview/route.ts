@@ -11,7 +11,7 @@ export async function POST(_: Request, { params }: Params) {
   const { id } = await params;
 
   try {
-    const preview = previewRestoreByBackupId(id);
+    const preview = await previewRestoreByBackupId(id);
     return NextResponse.json({ data: preview });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Restore preview failed";

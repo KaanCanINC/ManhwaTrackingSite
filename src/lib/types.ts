@@ -2,6 +2,7 @@ export type SeriesStatus = "plan_to_read" | "reading" | "completed" | "dropped" 
 export type SourceType = "TR" | "EN";
 export type PreferredSourceType = SourceType | "MAL" | "ANILIST" | "CUSTOM";
 export type MetadataSourceSite = "myanimelist" | "anilist";
+export type SeriesContentType = "MANHWA" | "MANHUA" | "MANGA";
 
 export interface SourceErrorInfo {
   message: string;
@@ -52,6 +53,7 @@ export interface Series {
   metadataSourceSite: MetadataSourceSite | null;
   metadataSourceCanonicalId: string | null;
   metadataSourceUpdatedAt: string | null;
+  contentType: SeriesContentType | null;
   enrichmentStatus?: "pending" | "running" | "failed" | null;
   enrichmentLastError?: string | null;
   preferredSourceType: PreferredSourceType | null;

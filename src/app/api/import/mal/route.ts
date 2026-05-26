@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { normalizeNickname, isValidPublicNickname } from "@/lib/importers/nickname";
 import { fetchMalImportByNickname, parseMalExport } from "@/lib/importers/mal";
+import { parseSeriesJsonImport } from "@/lib/importers/json-series";
+import { mapImportError, parseSelectedIndices } from "@/lib/importers/api-utils";
 import { runImport, runImportFromItems } from "@/lib/importers/handler";
 
 export const runtime = "nodejs";
@@ -15,9 +17,7 @@ export async function POST(request: NextRequest) {
   const mode = body.mode || "content";
   const content = String(body.content || "");
   const nickname = normalizeNickname(body.nickname);
-  const selectedIndices = Array.isArray(body.selectedIndices)
-    ? body.selectedIndices.filter((value): value is number => typeof value === "number" && Number.isInteger(value) && value >= 0)
-    : undefined;
+  const selectedIndices = parseSelectedIndices(body.selectedIndices);
 
   if (mode === "content" && !content.trim()) {
     return NextResponse.json({ error: "content is required" }, { status: 400 });
@@ -33,7 +33,12 @@ export async function POST(request: NextRequest) {
         ? await runImportFromItems("mal", await fetchMalImportByNickname(nickname), "json", undefined, {
             selectedIndices,
           })
-        : await runImport("mal", content, parseMalExport, "xml", undefined, { selectedIndices });
+        : await (async () => {
+            const isXml = content.trimStart().startsWith("<");
+            const parser = isXml ? parseMalExport : parseSeriesJsonImport;
+            const extension = isXml ? "xml" : "json";
+            return await runImport("mal", content, parser, extension, undefined, { selectedIndices });
+          })();
 
     return NextResponse.json({
       data: {
@@ -43,10 +48,7 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Import failed";
-    const status = /invalid|not found|private|rate limited|required|format/i.test(message)
-      ? 400
-      : 500;
+    const { message, status } = mapImportError(error);
     return NextResponse.json({ error: message }, { status });
   }
 }

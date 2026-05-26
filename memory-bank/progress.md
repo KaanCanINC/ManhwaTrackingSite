@@ -93,6 +93,16 @@
 - Improved scraper quality for problematic sites by enhancing extraction heuristics (JSON-LD parsing, title cleanup, summary extraction, alternative-title filtering, chapter-number parsing).
 - Improved blocked-page detection and Puppeteer challenge retry path for Cloudflare/WAF-style pages.
 - Added scraper utility regression tests (`src/lib/scrapers/html-utils.test.ts`).
+- Split dashboard monolith into feature-level components (`AddSeriesModal`, `ImportModal`, `BackupsModal`, `MangaCard`, `MangaListRow`).
+- Added SWR-based library data hook (`src/features/library/hooks/use-library-data.ts`) for centralized list/stats fetching and enrichment polling.
+- Added shared DTO contract layer (`src/lib/contracts.ts`) and wired import/backup/frontend consumers to reduce type duplication.
+- Added shared import route helper (`src/lib/importers/api-utils.ts`) and route-level dedup for selected-index parsing + error status mapping.
+- Refactored backup service to async fs APIs and route consumers to `await` backup operations.
+- Replaced backup download sync read with streamed response in `/api/backups/[id]/download`.
+- Split migration system into versioned files under `src/lib/db/migrations/` with registry-driven runner.
+- Moved daily backup trigger off list GET hot path and into change-backup flow.
+- Added full export button in dashboard to expose `/api/export/full` route.
+- Added tests for import API utils and backup restore routes (`restore`, `restore/preview`).
 - Revalidated quality gates after UX/scraper improvements (`npm run test`, `npm run build`, `npm run lint` with existing warnings only).
 - Revalidated quality gates after metadata foundation changes (`npm run lint`, `npm run test`, `npm run build`).
 - Revalidated quality gates after website import wiring (`npm run lint`, `npm run test`, `npm run build`).
@@ -106,6 +116,62 @@
 - Revalidated quality gates after enrichment stats/retry filters + backup delete/layout updates (`npm run lint`, `npm run test`, `npm run build`).
 - Revalidated quality gates after nickname import + re-enrich + adult warning updates (`npm run lint`, `npm run test`, `npm run build`).
 - Revalidated quality gates after metadata-source separation + enrichment matching hardening (`npm run lint`, `npm run test`, `npm run build`).
+- Revalidated quality gates after architecture refactor (`npm run lint`, `npm run test -- --run`, `npm run build`).
+- Added operation history migration (`v9`) with indexed `operation_history` table.
+- Added transactional operation history service with list + single-operation undo flow.
+- Extended series write APIs to return `meta.operationId` for create/update/delete.
+- Added history endpoints:
+- `GET /api/history`
+- `POST /api/history/[id]/undo`
+- Added dashboard Undo UX with notice action + dedicated History modal.
+- Added route tests for history list and undo APIs.
+- Revalidated quality gates after undo/history sprint start (`npm run lint`, `npm run test -- --run`, `npm run build`).
+- Added migration v10 for saved filters/collections (`saved_views`, `collection_items`) and wired migration registry.
+- Added migration v11 for user goals (`user_goals`) and wired migration registry.
+- Added saved views service + API routes:
+- `GET/POST /api/views`
+- `PATCH/DELETE /api/views/[id]`
+- `POST/DELETE /api/views/[id]/items`
+- `PATCH /api/views/[id]/items/reorder`
+- Added goals service + API routes:
+- `GET/POST /api/goals`
+- `PATCH/DELETE /api/goals/[id]`
+- `GET /api/goals/summary`
+- Added dashboard UI support for:
+- Saved Filters + Collections panel + save modal.
+- Goals & Progress panel + goals settings modal.
+- Added SWR hooks for saved views and goals summary data flows.
+- Added route tests for `GET/POST /api/views` and `GET /api/goals/summary`.
+- Revalidated quality gates after saved-views/goals implementation (`npm run lint`, `npm run test -- --run`, `npm run build`).
+- Added scraper support for requested hosts:
+- `webtoonhatti.club`
+- `vortexscans.org`
+- `nabicix.com`
+- `manhwaclan.co.uk`
+- Added mirror alias mapping so `nabicix.com` shares `siteId` with `nabimanga.com` for canonical merge consistency.
+- Added optional env-based generic host onboarding (`EXTRA_GENERIC_SCRAPER_HOSTS`) for WordPress/Madara-like domain-only additions.
+- Expanded scraper domain registry tests for new hosts + mirror alias behavior.
+- Revalidated quality gates after domain expansion (`npm run test -- --run src/lib/scrapers/domain-registry.test.ts`, `npm run lint`, `npm run build`).
+- Improved scraper reliability for problematic domains:
+- Added `manhwaclan.com` mirror alias to `manhwaclan-co-uk` site identity.
+- Improved title extraction heuristics to avoid generic site-brand titles overriding series names.
+- Improved cover extraction by scanning cover-like `<img>` tags before `og:image` fallback.
+- Added slug-based title fallback in generic parser to avoid hard failure on challenge pages.
+- Added/updated scraper tests for:
+- heading-priority title extraction,
+- chapter parsing precision,
+- mirror alias behavior.
+- Revalidated quality gates after reliability fixes (`npm run test -- --run src/lib/scrapers/html-utils.test.ts src/lib/scrapers/domain-registry.test.ts`, `npm run lint`, `npm run build`).
+- Added requested domain/mirror support updates:
+- `demonicscans.org` support in registry.
+- `asurascans.com` mapped to shared `asuracomic` identity.
+- `webtoonhattı.club` (punycode alias) mapped to `webtoonhatti-club`.
+- Added scraper extraction and cover-download hardening for live failures:
+- chapter extraction expanded for query-param format (`?chapter=`),
+- cover candidate ordering improved to avoid JSON-LD logo traps,
+- cover-download fallback now includes proxy retry and Puppeteer screenshot fallback for hotlink-blocked sites.
+- Added `Series Type` (`MANHWA`/`MANHUA`/`MANGA`) as a persisted single-select field across migration + backend + UI.
+- Revalidated quality gates after this batch (`npm run test -- --run src/lib/scrapers/html-utils.test.ts src/lib/scrapers/domain-registry.test.ts src/lib/importers/json-series.test.ts`, `npm run lint`, `npm run build`).
 
 ## Remaining
 - Expand automated tests for backup rotation and repository edge cases.
@@ -113,3 +179,4 @@
 - Add optional Google Drive backup integration in v2.
 - Continue scraper domain rollout in additional batches for remaining requested hosts:
 	`adumanga.com`, `afroditscans.com`, `alucardscans.com`, `eldermanga.com`, `eskimangalar.com`, `mangadiyari.com`, `mangakings.com.tr`, `raindropteamfan.com`, `hivetoons.org`, `uzaymanga.com`, `trwebtoon.com`, `mangagezgini.love`, `flamecomics.xyz`, `manhuaplus.org`, `vortexscans.org`, `roliascan.com`, `demonicscans.org`, `utoon.net`, `vortexmanga.com`.
+- Implement deferred universal fallback mode for unsupported sites (template-aware generic parsing + clearer non-fatal user message) to reduce per-domain manual onboarding.

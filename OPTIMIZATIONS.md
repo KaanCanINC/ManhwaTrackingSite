@@ -1,4 +1,4 @@
-# Optimization Audit — Manhwa Tracking Site
+# Optimization Audit — ManCon
 
 **Audit Date:** 2026-03-07  
 **Stack:** Next.js 16 (App Router) · React 19 · TypeScript · SQLite (better-sqlite3) · Tailwind CSS 4  

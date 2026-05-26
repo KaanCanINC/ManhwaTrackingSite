@@ -88,5 +88,7 @@ export async function fetchPageHtml(url: string, timeoutMs = DEFAULT_TIMEOUT_MS)
   }
 
   const fallback = await fetchWithPuppeteer(url, timeoutMs);
-  return { finalUrl: fallback.finalUrl, html: fallback.html, usedPuppeteer: true };
+  // Keep the original URL for downstream slug fallback when challenge pages rewrite to /cdn-cgi paths.
+  const finalUrl = isLikelyBlocked(200, fallback.html) ? url : fallback.finalUrl;
+  return { finalUrl, html: fallback.html, usedPuppeteer: true };
 }

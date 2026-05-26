@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { normalizeNickname, isValidPublicNickname } from "@/lib/importers/nickname";
 import { getImportPreviewFromItems } from "@/lib/importers/handler";
-import { fetchAnilistImportByNickname, parseAnilistExport } from "@/lib/importers/anilist";
+import { fetchAnilistImportByNickname } from "@/lib/importers/anilist";
 import { fetchMalImportByNickname, parseMalExport } from "@/lib/importers/mal";
+import { parseAnilistOrSeriesJsonImport, parseSeriesJsonImport } from "@/lib/importers/json-series";
+import { mapImportError } from "@/lib/importers/api-utils";
 
 export const runtime = "nodejs";
 
@@ -43,20 +45,16 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ data: { items: getImportPreviewFromItems(items) } });
     }
 
-    const parser =
-      source === "mal"
-        ? parseMalExport
-        : content.trimStart().startsWith("<")
-          ? parseMalExport
-          : parseAnilistExport;
+    const parser = content.trimStart().startsWith("<")
+      ? parseMalExport
+      : source === "mal"
+        ? parseSeriesJsonImport
+        : parseAnilistOrSeriesJsonImport;
 
     const items = getImportPreviewFromItems(parser(content));
     return NextResponse.json({ data: { items } });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Preview failed";
-    const status = /invalid|not found|private|rate limited|required|format/i.test(message)
-      ? 400
-      : 500;
+    const { message, status } = mapImportError(error);
     return NextResponse.json({ error: message }, { status });
   }
 }

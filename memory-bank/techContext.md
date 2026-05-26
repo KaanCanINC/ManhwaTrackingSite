@@ -5,6 +5,7 @@
 - better-sqlite3 for local database.
 - fast-xml-parser for MAL import.
 - zod for payload validation.
+- swr for client-side data fetching and refresh/polling.
 - vitest for tests.
 - eslint + `react-hooks` rules enforced in CI/local checks.
 

@@ -1,5 +1,5 @@
 import { XMLParser } from "fast-xml-parser";
-import type { PreferredSourceType, SeriesStatus } from "@/lib/types";
+import type { PreferredSourceType, SeriesContentType, SeriesStatus } from "@/lib/types";
 
 interface MalAnime {
   series_title?: string;
@@ -87,6 +87,7 @@ export interface ImportSeriesInput {
   reread: boolean;
   novelToRead: boolean;
   followUpdates: boolean;
+  contentType?: SeriesContentType | null;
   preferredSourceType?: PreferredSourceType | null;
   coverImageBlob?: Uint8Array | null;
   coverImageMimeType?: string | null;

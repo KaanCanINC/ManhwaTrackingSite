@@ -25,7 +25,13 @@ function registerHost(host: string, parser: SiteScraper, siteId = toSiteId(host)
   HOST_REGISTRY.set(canonicalHost(host), { siteId, parser });
 }
 
+function registerGenericHost(host: string, forcedSiteId?: string) {
+  const siteId = forcedSiteId ?? toSiteId(host);
+  registerHost(host, createGenericSiteParser(siteId), siteId);
+}
+
 registerHost("asuracomic.net", parseAsuraComic, "asuracomic");
+registerHost("asurascans.com", parseAsuraComic, "asuracomic");
 registerHost("manhuaus.com", parseManhuaUs, "manhuaus");
 registerHost("asurascans.com.tr", parseAsuraScansTr, "asurascans-tr");
 
@@ -33,6 +39,10 @@ const GENERIC_MADARA_HOSTS = [
   "golgebahcesi.com",
   "tilkiscans.com",
   "nabimanga.com",
+  "webtoonhatti.club",
+  "demonicscans.org",
+  "vortexscans.org",
+  "manhwaclan.co.uk",
   "nemesisscans.com",
   "nirvanamanga.com",
   "paradoxscans.com",
@@ -50,7 +60,22 @@ const GENERIC_MADARA_HOSTS = [
 ];
 
 for (const host of GENERIC_MADARA_HOSTS) {
-  registerHost(host, createGenericSiteParser(toSiteId(host)));
+  registerGenericHost(host);
+}
+
+// Mirror domain using same site identity to avoid split canonical namespaces.
+registerGenericHost("nabicix.com", "nabimanga-com");
+registerGenericHost("manhwaclan.com", "manhwaclan-co-uk");
+registerGenericHost("xn--webtoonhatt-9zb.club", "webtoonhatti-club");
+
+// Optional runtime extension for host-only additions without code changes.
+const EXTRA_GENERIC_HOSTS = (process.env.EXTRA_GENERIC_SCRAPER_HOSTS || "")
+  .split(",")
+  .map((host) => canonicalHost(host))
+  .filter(Boolean);
+
+for (const host of EXTRA_GENERIC_HOSTS) {
+  registerGenericHost(host);
 }
 
 export function resolveSiteByUrl(url: string): SiteRegistration {

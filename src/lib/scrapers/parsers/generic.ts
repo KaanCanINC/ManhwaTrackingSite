@@ -10,9 +10,22 @@ import {
 } from "@/lib/scrapers/html-utils";
 import type { ScraperSiteId, SiteScraper } from "@/lib/scrapers/types";
 
+function titleFromSlug(url: string): string {
+  const slug = getCanonicalSlug(url);
+  if (!slug) return "";
+
+  return slug
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ")
+    .trim();
+}
+
 export function createGenericSiteParser(site: ScraperSiteId): SiteScraper {
   return ({ finalUrl, html }) => {
-    const title = sanitizeTitle(extractTitle(html));
+    const extractedTitle = sanitizeTitle(extractTitle(html));
+    const title = extractedTitle || titleFromSlug(finalUrl);
 
     if (!title) {
       throw new Error(`Unable to parse title for ${site}`);

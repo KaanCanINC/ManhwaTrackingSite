@@ -1,6 +1,6 @@
-# Manhwa Tracking Site
+# ManCon
 
-Self-hosted manhwa/manga tracking app built with Next.js + SQLite.
+Self-hosted manhwa/manga tracking app built with Next.js + SQLite
 
 ## Storage Model
 
@@ -26,7 +26,7 @@ Default local storage is `<project>/data` unless you set `DATA_DIR`.
 Example with custom storage root:
 
 ```bash
-DATA_DIR=/tmp/manhwa-tracker-data npm run dev
+DATA_DIR=/tmp/mancon-data npm run dev
 ```
 
 ## Self-Hosted (Docker Compose)
@@ -35,9 +35,9 @@ The provided `docker-compose.yml` is configured for persistent host paths and no
 
 Default host mount targets:
 
-- `/var/lib/casaos/appdata/manhwa-tracker/database` -> `/data/database`
-- `/var/lib/casaos/appdata/manhwa-tracker/backups` -> `/data/backups`
-- `/var/lib/casaos/appdata/manhwa-tracker/imports` -> `/data/imports`
+- `/var/lib/casaos/appdata/mancon/database` -> `/data/database`
+- `/var/lib/casaos/appdata/mancon/backups` -> `/data/backups`
+- `/var/lib/casaos/appdata/mancon/imports` -> `/data/imports`
 
 Start:
 
@@ -99,8 +99,8 @@ git push origin v1.0.0
 1. In CasaOS terminal, create project folder and copy files:
 
 ```bash
-mkdir -p /DATA/AppData/manhwa-tracker
-cd /DATA/AppData/manhwa-tracker
+mkdir -p /DATA/AppData/mancon
+cd /DATA/AppData/mancon
 ```
 
 2. Place these files in that folder:
@@ -136,7 +136,7 @@ docker compose up -d
 
 ```bash
 docker ps
-docker logs -f manhwa-tracker
+docker logs -f mancon
 ```
 
 ## Migration from `./data` (Old Layout)
@@ -153,11 +153,11 @@ Example:
 
 ```bash
 docker compose down
-sudo mkdir -p /var/lib/casaos/appdata/manhwa-tracker/{database,backups,imports}
-sudo cp -a ./data/database/. /var/lib/casaos/appdata/manhwa-tracker/database/
-sudo cp -a ./data/backups/. /var/lib/casaos/appdata/manhwa-tracker/backups/
-sudo cp -a ./data/imports/. /var/lib/casaos/appdata/manhwa-tracker/imports/
-sudo chown -R 1000:1000 /var/lib/casaos/appdata/manhwa-tracker
+sudo mkdir -p /var/lib/casaos/appdata/mancon/{database,backups,imports}
+sudo cp -a ./data/database/. /var/lib/casaos/appdata/mancon/database/
+sudo cp -a ./data/backups/. /var/lib/casaos/appdata/mancon/backups/
+sudo cp -a ./data/imports/. /var/lib/casaos/appdata/mancon/imports/
+sudo chown -R 1000:1000 /var/lib/casaos/appdata/mancon
 docker compose up -d --build
 ```
 

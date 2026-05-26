@@ -1,19 +1,12 @@
 import { randomUUID } from "node:crypto";
-import fs from "node:fs";
+import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getDb } from "@/lib/db";
 import { enqueueImportEnrichmentJobs } from "@/lib/enrichment/queue";
+import type { ImportPreviewItem } from "@/lib/contracts";
 import type { ImportSeriesInput } from "./mal";
 import { batchMergeSeriesByTitle, mergeSeriesByTitle } from "@/lib/series-repository";
 import { dataPaths } from "@/lib/db/storage";
-
-export type ImportPreviewItem = {
-  index: number;
-  title: string;
-  status: string;
-  totalChapters: number;
-  chaptersRead: number;
-};
 
 type RunImportOptions = {
   selectedIndices?: number[];
@@ -60,7 +53,7 @@ async function runImportCore({
 }: RunImportCoreArgs): Promise<{ added: number; merged: number; fileName: string; queuedEnrichment: number }> {
   const fileName = `import-${source}-${Date.now()}.${fileExtension}`;
   const fullPath = path.join(dataPaths.importsDir, fileName);
-  fs.writeFileSync(fullPath, rawContent, "utf8");
+  await writeFile(fullPath, rawContent, "utf8");
 
   let added = 0;
   let merged = 0;

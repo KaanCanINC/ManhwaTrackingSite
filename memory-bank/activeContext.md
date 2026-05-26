@@ -86,6 +86,16 @@
 - Added generic site parser factory for madara/wp-manga style pages to scale domain onboarding safely.
 - Completed scraper domain support batch-1 (17 hosts): `golgebahcesi.com`, `tilkiscans.com`, `nabimanga.com`, `nemesisscans.com`, `nirvanamanga.com`, `paradoxscans.com`, `patimanga.com`, `ragnarscans.com`, `sereinscan.net`, `manga-sehri.net`, `merlintoon.com`, `ruyamanga.net`, `ruyamanga2.com`, `mangahanedanligi.com`, `mangaruhu.com`, `hayalistic.net`, `arcurafansub.com`.
 - Added `src/lib/scrapers/domain-registry.test.ts` to lock host normalization and unsupported-domain behavior.
+- Started architecture hardening pass for maintainability/performance:
+- Split homepage monolith into feature components under `src/features/library/components`.
+- Added `useLibraryData` SWR hook for centralized series + enrichment stats loading and polling.
+- Added shared contracts in `src/lib/contracts.ts` to remove duplicated frontend/backend DTO types.
+- Added import API helper module (`src/lib/importers/api-utils.ts`) for shared selected-index parsing and error mapping.
+- Refactored backup service and key consumers to async file I/O (`fs/promises`) and stream-based backup download.
+- Split DB migration monolith into file-based migration registry under `src/lib/db/migrations/*`.
+- Removed daily backup trigger from frequent `GET /api/series` path; backup checks now run on mutation-triggered backup flow.
+- Added dashboard action for full JSON export (`/api/export/full`) so route is actively reachable from UI.
+- Added/updated tests for import API helpers and backup restore routes (apply + preview).
 - Updated Add Series modal UX:
 - Added cover preview box and custom cover upload (image file -> base64) with clear action.
 - Moved `Synopsis` field directly below `Title`.
@@ -97,3 +107,48 @@
 - Improved alternative-title filtering to skip noisy template fragments.
 - Expanded total-chapter parsing for `Bölüm/Bolum/Chapter/Episode` URL/text patterns.
 - Improved challenge detection/fallback (`Just a moment`, WAF verification pages) with additional Puppeteer wait/reload pass.
+- Started Sprint-1 implementation for Undo + Operation History.
+- Added migration v9 for `operation_history` table and indexes.
+- Added operation history service with list + transactional undo execution.
+- Extended series repository with operation-aware write functions that capture before/after snapshots and emit operation IDs.
+- Updated series create/update/delete API responses to include `meta.operationId`.
+- Added new APIs:
+- `GET /api/history`
+- `POST /api/history/[id]/undo`
+- Added dashboard UX integration:
+- Notice-level Undo action button using latest operation ID.
+- History modal for browsing recent operations and applying undo manually.
+- Added route tests for history list and undo endpoints.
+- Started Sprint-2 and Sprint-3 foundations for dashboard planning features.
+- Added migration v10 for saved views and collection items.
+- Added migration v11 for user goals.
+- Added Saved Views backend service and API routes (`/api/views`, `/api/views/[id]`, collection item endpoints).
+- Added Goals backend service and API routes (`/api/goals`, `/api/goals/[id]`, `/api/goals/summary`).
+- Added dashboard UI integration for:
+- Saved Filters + Collections panel (save/apply/delete).
+- Goals + Progress panel and goal settings modal.
+- Added SWR hooks for saved views and goals summary refresh.
+- Expanded scraper domain support for newly requested hosts:
+- `webtoonhatti.club`
+- `vortexscans.org`
+- `nabicix.com`
+- `manhwaclan.co.uk`
+- Added mirror-host handling for identical site clones:
+- `nabicix.com` now shares canonical scraper site identity with `nabimanga.com` (`siteId: nabimanga-com`) to reduce duplicate-merge drift.
+- Added optional runtime extension for generic WP/Madara-style hosts via `EXTRA_GENERIC_SCRAPER_HOSTS` env var (comma-separated hosts) to reduce code edits for domain-only additions.
+- Hardened generic scraper extraction against site-brand noise and weak metadata pages:
+- Title extraction now prioritizes page `<h1>` and filters generic brand-like JSON-LD names (e.g. `... Scans`).
+- Cover extraction now checks image tags with cover-like selectors before falling back to `og:image`.
+- Generic parser now falls back to URL slug-based title when anti-bot challenge pages hide metadata.
+- Added mirror alias for `manhwaclan.com` -> shared `siteId` with `manhwaclan.co.uk` (`manhwaclan-co-uk`).
+- Added requested scraper-domain updates:
+- `demonicscans.org` support (generic parser).
+- `asurascans.com` alias to shared `siteId` with `asuracomic.net` (`asuracomic`).
+- Punycode host alias for Turkish-dotless variant `webtoonhattı.club` (`xn--webtoonhatt-9zb.club`) mapped to `webtoonhatti-club`.
+- Improved scraper resilience for user-reported failures:
+- Cover extraction now prioritizes cover-like `<img>` and OG/Twitter image candidates before JSON-LD logo-like images.
+- Chapter extraction now includes query-parameter formats (e.g. `?chapter=16`) and key-value style chapter fields.
+- Cover download now has stronger fallback chain: direct fetch -> proxy retry -> Puppeteer element screenshot fallback.
+- Asura parser now rejects 404/challenge-like titles (`Page Not Found`, `Lost in the Void`) and falls back to URL slug title.
+- Added persisted single-select `Series Type` field (`MANHWA`/`MANHUA`/`MANGA`) across DB migration, repository/API, add form, detail form, and library card/list badges.
+- Deferred (explicitly TODO by user): replace strict unsupported-domain behavior with universal template-aware fallback messaging and scalable same-template mirror handling.

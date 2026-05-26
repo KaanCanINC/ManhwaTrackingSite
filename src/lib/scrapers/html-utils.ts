@@ -2,6 +2,7 @@ const META_PATTERNS = {
   ogTitle: /<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["'][^>]*>/i,
   ogDescription: /<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']*)["'][^>]*>/i,
   ogImage: /<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["'][^>]*>/i,
+  twitterImage: /<meta[^>]*name=["']twitter:image["'][^>]*content=["']([^"']+)["'][^>]*>/i,
   twitterTitle: /<meta[^>]*name=["']twitter:title["'][^>]*content=["']([^"']+)["'][^>]*>/i,
   twitterDescription: /<meta[^>]*name=["']twitter:description["'][^>]*content=["']([^"']*)["'][^>]*>/i,
   titleTag: /<title[^>]*>([^<]+)<\/title>/i,
@@ -9,6 +10,11 @@ const META_PATTERNS = {
 
 const JSON_LD_PATTERN = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
 const URL_NUMBER_PATTERN = /\/(?:chapter|chap(?:ter)?|bolum|b[o\u00f6]l[u\u00fc]m|episode|ep)[-_ ]?(\d{1,5}(?:\.\d+)?)(?:\/|\?|$)/giu;
+const QUERY_NUMBER_PATTERN = /[?&](?:chapter|chap(?:ter)?|episode|ep|bolum|b[o\u00f6]l[u\u00fc]m)=?(\d{1,5}(?:\.\d+)?)(?:&|$)/giu;
+const IMAGE_TAG_PATTERN = /<img[^>]+(?:itemprop=["']image["'][^>]*|class=["'][^"']*(?:summary_image|cover|thumb|poster|manga-thumb|featured)[^"']*["'][^>]*|alt=["'][^"']*cover[^"']*["'][^>]*)>/gi;
+const IMAGE_SRC_PATTERN = /(?:data-src|data-lazy-src|data-srcset|src)=["']([^"']+)["']/i;
+const HEADING_PATTERN = /<h1[^>]*>([\s\S]{1,260}?)<\/h1>/gi;
+const HOSTNAME_PATTERN = /^(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+\/?$/i;
 
 type JsonLdCandidate = {
   name: string | null;
@@ -141,6 +147,72 @@ function extractSummaryContent(html: string): string | null {
   return best || null;
 }
 
+function extractHeadingTitle(html: string): string | null {
+  for (const match of html.matchAll(HEADING_PATTERN)) {
+    const text = stripHtml(match[1] || "");
+    if (!text) continue;
+    if (/^(trending this month|just a moment|loading)$/i.test(text)) continue;
+    if (text.length < 3) continue;
+    return text;
+  }
+
+  return null;
+}
+
+function looksLikeSiteBrandTitle(value: string): boolean {
+  const lowered = cleanText(value).toLowerCase();
+  if (!lowered) return true;
+  if (lowered === "just a moment..." || lowered === "just a moment") return true;
+
+  const words = lowered.split(/\s+/g).filter(Boolean);
+  const brandish = /(scan|scans|manga|manhwa|webtoon)/.test(lowered);
+  return brandish && words.length <= 4 && !/[0-9]/.test(lowered);
+}
+
+function firstNonBrand(candidates: Array<string | null | undefined>): string | null {
+  for (const raw of candidates) {
+    const value = cleanText(raw || "");
+    if (!value) continue;
+    if (!looksLikeSiteBrandTitle(value)) {
+      return value;
+    }
+  }
+
+  for (const raw of candidates) {
+    const value = cleanText(raw || "");
+    if (!value) continue;
+    if (looksLikeSiteBrandTitle(value)) continue;
+    if (HOSTNAME_PATTERN.test(value)) continue;
+    return value;
+  }
+
+  return null;
+}
+
+function isLikelyNonCoverUrl(value: string): boolean {
+  const lowered = value.toLowerCase();
+  return /(?:^|\W)(logo|icon|favicon|avatar|emoji)(?:\W|$)/i.test(lowered);
+}
+
+function normalizeImageUrl(value: string): string {
+  const decoded = cleanText(value.replace(/&amp;/g, "&"));
+  const firstSrcSet = decoded.split(",")[0]?.trim() || decoded;
+  return firstSrcSet.split(/\s+/)[0] || "";
+}
+
+function extractImageFromTags(html: string): string | null {
+  for (const match of html.matchAll(IMAGE_TAG_PATTERN)) {
+    const tag = match[0] || "";
+    const srcMatch = tag.match(IMAGE_SRC_PATTERN);
+    const src = normalizeImageUrl(srcMatch?.[1] || "");
+    if (!src) continue;
+    if (isLikelyNonCoverUrl(src)) continue;
+    return src;
+  }
+
+  return null;
+}
+
 export function cleanText(input: string | null | undefined): string {
   if (!input) return "";
   const compact = input.replace(/\s+/g, " ").trim();
@@ -153,16 +225,14 @@ export function extractMetaContent(html: string, pattern: RegExp): string | null
 }
 
 export function extractTitle(html: string): string {
+  const headingTitle = extractHeadingTitle(html);
   const jsonLd = collectJsonLdCandidates(html);
-  const jsonTitle = jsonLd.find((item) => item.name && item.name.length > 1)?.name;
+  const jsonTitles = jsonLd.map((item) => item.name).filter((title): title is string => Boolean(title));
+  const ogTitle = extractMetaContent(html, META_PATTERNS.ogTitle);
+  const twitterTitle = extractMetaContent(html, META_PATTERNS.twitterTitle);
+  const titleTag = extractMetaContent(html, META_PATTERNS.titleTag);
 
-  return (
-    jsonTitle ||
-    extractMetaContent(html, META_PATTERNS.ogTitle) ||
-    extractMetaContent(html, META_PATTERNS.twitterTitle) ||
-    extractMetaContent(html, META_PATTERNS.titleTag) ||
-    ""
-  );
+  return firstNonBrand([headingTitle, ...jsonTitles, ogTitle, twitterTitle, titleTag]) || "";
 }
 
 export function extractDescription(html: string): string {
@@ -181,9 +251,19 @@ export function extractDescription(html: string): string {
 
 export function extractCoverImageUrl(html: string): string | null {
   const jsonLd = collectJsonLdCandidates(html);
-  const jsonImage = jsonLd.find((item) => item.image)?.image;
-  if (jsonImage) return jsonImage;
-  return extractMetaContent(html, META_PATTERNS.ogImage);
+  const tagImage = extractImageFromTags(html);
+  if (tagImage) return tagImage;
+
+  const ogImage = extractMetaContent(html, META_PATTERNS.ogImage);
+  if (ogImage && !isLikelyNonCoverUrl(ogImage)) return normalizeImageUrl(ogImage);
+
+  const twitterImage = extractMetaContent(html, META_PATTERNS.twitterImage);
+  if (twitterImage && !isLikelyNonCoverUrl(twitterImage)) return normalizeImageUrl(twitterImage);
+
+  const jsonImage = jsonLd
+    .map((item) => item.image)
+    .find((candidate): candidate is string => Boolean(candidate && !isLikelyNonCoverUrl(candidate)));
+  return jsonImage ? normalizeImageUrl(jsonImage) : null;
 }
 
 export function sanitizeTitle(title: string): string {
@@ -267,7 +347,8 @@ export function extractAlternativeTitles(html: string): string[] {
 
 export function extractTotalChapters(html: string): number | null {
   let max = 0;
-  const chapterPattern = /(?:chapter|chap(?:ter)?|b[o\u00f6]l[u\u00fc]m|bolum|episode|ep)\s*[-:#.]?\s*(\d{1,5}(?:\.\d+)?)/giu;
+  const chapterPattern = /(?:\bchapter\b|\bchap(?:ter)?\b|\bb[o\u00f6]l[u\u00fc]m\b|\bbolum\b|\bepisode\b|\bep\b)\s*[-:#.]?\s*(\d{1,5}(?:\.\d+)?)/giu;
+  const chapterKeyValuePattern = /(?:chapter(?:number)?|bolum|b[o\u00f6]l[u\u00fc]m|episode)\s*(?:["']|&quot;)?\s*[:=]\s*(?:["']|&quot;)?(\d{1,5}(?:\.\d+)?)/giu;
 
   for (const match of html.matchAll(chapterPattern)) {
     const parsed = Number(match[1]);
@@ -277,6 +358,20 @@ export function extractTotalChapters(html: string): number | null {
   }
 
   for (const match of html.matchAll(URL_NUMBER_PATTERN)) {
+    const parsed = Number(match[1]);
+    if (Number.isFinite(parsed) && parsed > max) {
+      max = Math.floor(parsed);
+    }
+  }
+
+  for (const match of html.matchAll(QUERY_NUMBER_PATTERN)) {
+    const parsed = Number(match[1]);
+    if (Number.isFinite(parsed) && parsed > max) {
+      max = Math.floor(parsed);
+    }
+  }
+
+  for (const match of html.matchAll(chapterKeyValuePattern)) {
     const parsed = Number(match[1]);
     if (Number.isFinite(parsed) && parsed > max) {
       max = Math.floor(parsed);

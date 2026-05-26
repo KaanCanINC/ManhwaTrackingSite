@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ZodError } from "zod";
 import { createChangeBackupIfCooledDown } from "@/lib/backup-service";
-import { deleteSeries, getSeriesById, updateSeries } from "@/lib/series-repository";
+import {
+  deleteSeriesWithOperation,
+  getSeriesById,
+  updateSeriesWithOperation,
+} from "@/lib/series-repository";
 
 export const runtime = "nodejs";
 
@@ -28,14 +32,14 @@ export async function PATCH(request: NextRequest, { params }: Params) {
     if (typeof payload.coverImageBase64 === "string" && payload.coverImageBase64.trim()) {
       payload.coverImageBlob = Buffer.from(payload.coverImageBase64, "base64");
     }
-    const updated = updateSeries(id, payload);
+    const updated = updateSeriesWithOperation(id, payload);
 
     if (!updated) {
       return NextResponse.json({ error: "Series not found" }, { status: 404 });
     }
 
-    createChangeBackupIfCooledDown();
-    return NextResponse.json({ data: updated });
+    await createChangeBackupIfCooledDown();
+    return NextResponse.json({ data: updated.series, meta: { operationId: updated.operationId } });
   } catch (error) {
     if (error instanceof ZodError) {
       return NextResponse.json({ error: error.flatten() }, { status: 400 });
@@ -49,12 +53,12 @@ export async function PATCH(request: NextRequest, { params }: Params) {
 
 export async function DELETE(_: NextRequest, { params }: Params) {
   const { id } = await params;
-  const deleted = deleteSeries(id);
+  const deleted = deleteSeriesWithOperation(id);
 
   if (!deleted) {
     return NextResponse.json({ error: "Series not found" }, { status: 404 });
   }
 
-  createChangeBackupIfCooledDown();
-  return NextResponse.json({ ok: true });
+  await createChangeBackupIfCooledDown();
+  return NextResponse.json({ ok: true, meta: { operationId: deleted.operationId } });
 }

@@ -1,8 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { getDb } from "@/lib/db";
+import {
+  insertOperationHistory,
+  type OperationEntitySnapshot,
+  type OperationSourceSnapshot,
+} from "@/lib/operation-history";
 import type {
   MetadataSourceSite,
+  SeriesContentType,
   PreferredSourceType,
   RereadSession,
   Series,
@@ -44,6 +50,7 @@ const baseSeriesSchema = z.object({
   description: z.string().default(""),
   personalNotes: z.string().default(""),
   status: z.enum(["plan_to_read", "reading", "completed", "dropped", "up_to_date"] as const),
+  contentType: z.enum(["MANHWA", "MANHUA", "MANGA"]).nullable().default(null),
   reread: z.boolean().default(false),
   totalRereads: z.number().int().min(0).default(0),
   rereadSessions: z.array(rereadSessionSchema).default([]),
@@ -75,6 +82,7 @@ type SeriesRow = {
   description: string;
   personal_notes: string;
   status: SeriesStatus;
+  content_type: SeriesContentType | null;
   reread: number;
   total_rereads: number;
   reread_sessions: string;
@@ -160,6 +168,49 @@ type SeriesSourceRow = {
   meta: string | null;
 };
 
+type SnapshotSeriesRow = {
+  id: string;
+  title: string;
+  total_chapters: number;
+  chapters_read: number;
+  start_date: string | null;
+  finish_date: string | null;
+  rating: number | null;
+  description: string;
+  personal_notes: string;
+  status: SeriesStatus;
+  content_type: SeriesContentType | null;
+  reread: number;
+  total_rereads: number;
+  reread_sessions: string;
+  novel_to_read: number;
+  follow_updates: number;
+  preferred_source_type: PreferredSourceType | null;
+  cover_image_blob: Uint8Array | null;
+  cover_image_mime_type: string | null;
+  cover_image_fetched_at: string | null;
+  metadata_fetched_at: string | null;
+  metadata_source_url: string | null;
+  metadata_source_site: MetadataSourceSite | null;
+  metadata_source_canonical_id: string | null;
+  metadata_source_updated_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type SnapshotSourceRow = {
+  id: string;
+  type: SourceType;
+  url: string;
+  site: string | null;
+  canonical_id: string | null;
+  scraped_at: string | null;
+  scraper_name: string | null;
+  last_error: string | null;
+  meta: string | null;
+  created_at: string;
+};
+
 function parseRereadSessions(raw: string): RereadSession[] {
   try {
     const parsed = JSON.parse(raw) as unknown;
@@ -187,6 +238,7 @@ function mapSeriesRow(row: SeriesRow): Omit<Series, "sources"> {
     description: row.description ?? "",
     personalNotes: row.personal_notes,
     status: row.status,
+    contentType: row.content_type,
     reread: Boolean(row.reread),
     totalRereads: row.total_rereads ?? 0,
     rereadSessions: parseRereadSessions(row.reread_sessions ?? "[]"),
@@ -261,6 +313,84 @@ function getSources(seriesId: string): Series["sources"] {
     lastError: parseSourceError(row.last_error),
     meta: parseJsonObject(row.meta),
   }));
+}
+
+function getSeriesSnapshotById(id: string): OperationEntitySnapshot | null {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT
+         id, title, total_chapters, chapters_read, start_date, finish_date, rating,
+        description, personal_notes, status, content_type, reread, total_rereads, reread_sessions,
+         novel_to_read, follow_updates, preferred_source_type,
+         cover_image_blob, cover_image_mime_type, cover_image_fetched_at, metadata_fetched_at,
+         metadata_source_url, metadata_source_site, metadata_source_canonical_id, metadata_source_updated_at,
+         created_at, updated_at
+       FROM series
+       WHERE id = ?
+       LIMIT 1`,
+    )
+    .get(id) as SnapshotSeriesRow | undefined;
+
+  if (!row) {
+    return null;
+  }
+
+  const sourceRows = db
+    .prepare(
+      `SELECT id, type, url, site, canonical_id, scraped_at, scraper_name, last_error, meta, created_at
+       FROM series_sources
+       WHERE series_id = ?`,
+    )
+    .all(id) as SnapshotSourceRow[];
+
+  const sources: OperationSourceSnapshot[] = sourceRows.map((source) => ({
+    id: source.id,
+    type: source.type,
+    url: source.url,
+    site: source.site,
+    canonicalId: source.canonical_id,
+    scrapedAt: source.scraped_at,
+    scraperName: source.scraper_name,
+    lastError: parseSourceError(source.last_error),
+    meta: parseJsonObject(source.meta),
+    createdAt: source.created_at,
+  }));
+
+  return {
+    series: {
+      id: row.id,
+      title: row.title,
+      totalChapters: row.total_chapters,
+      chaptersRead: row.chapters_read,
+      startDate: row.start_date,
+      finishDate: row.finish_date,
+      rating: row.rating,
+      description: row.description,
+      personalNotes: row.personal_notes,
+      status: row.status,
+      contentType: row.content_type,
+      reread: Boolean(row.reread),
+      totalRereads: row.total_rereads,
+      rereadSessions: parseRereadSessions(row.reread_sessions),
+      novelToRead: Boolean(row.novel_to_read),
+      followUpdates: Boolean(row.follow_updates),
+      preferredSourceType: row.preferred_source_type,
+      coverImageBlobBase64: row.cover_image_blob
+        ? Buffer.from(row.cover_image_blob).toString("base64")
+        : null,
+      coverImageMimeType: row.cover_image_mime_type,
+      coverImageFetchedAt: row.cover_image_fetched_at,
+      metadataFetchedAt: row.metadata_fetched_at,
+      metadataSourceUrl: row.metadata_source_url,
+      metadataSourceSite: row.metadata_source_site,
+      metadataSourceCanonicalId: row.metadata_source_canonical_id,
+      metadataSourceUpdatedAt: row.metadata_source_updated_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    },
+    sources,
+  };
 }
 
 function attachSources(rows: SeriesRow[]): Series[] {
@@ -434,7 +564,7 @@ export function listSeries(filters: SeriesFilters = {}): Series[] {
 
   const sql = [
     `SELECT id, title, total_chapters, chapters_read, start_date, finish_date, rating,
-            description, personal_notes, status, reread, total_rereads, reread_sessions,
+          description, personal_notes, status, content_type, reread, total_rereads, reread_sessions,
             novel_to_read, follow_updates, preferred_source_type,
             cover_image_mime_type, cover_image_fetched_at,
             metadata_fetched_at, metadata_source_url, metadata_source_site,
@@ -456,7 +586,7 @@ export function getSeriesById(id: string): Series | null {
   const db = getDb();
   const row = db.prepare(
     `SELECT id, title, total_chapters, chapters_read, start_date, finish_date, rating,
-            description, personal_notes, status, reread, total_rereads, reread_sessions,
+            description, personal_notes, status, content_type, reread, total_rereads, reread_sessions,
             novel_to_read, follow_updates, preferred_source_type,
             cover_image_mime_type, cover_image_fetched_at,
             metadata_fetched_at, metadata_source_url, metadata_source_site,
@@ -478,12 +608,13 @@ export function getSeriesById(id: string): Series | null {
   ])[0] || null;
 }
 
-export function createSeries(payload: unknown): Series {
+export function createSeriesWithOperation(payload: unknown): { series: Series; operationId: string } {
   const db = getDb();
   const input = createSeriesSchema.parse(payload);
   const id = randomUUID();
   const now = new Date().toISOString();
   const metadataSource = normalizeMetadataSource(input);
+  let operationId = "";
 
   const sourceEntries = input.sources.map((s) => ({
     id: randomUUID(),
@@ -503,11 +634,11 @@ export function createSeries(payload: unknown): Series {
       `
       INSERT INTO series (
         id, title, total_chapters, chapters_read, start_date, finish_date, rating,
-        description, personal_notes, status, reread, total_rereads, reread_sessions,
+        description, personal_notes, status, content_type, reread, total_rereads, reread_sessions,
         novel_to_read, follow_updates, preferred_source_type, created_at, updated_at,
         metadata_source_url, metadata_source_site, metadata_source_canonical_id, metadata_source_updated_at
         , cover_image_blob, cover_image_mime_type, cover_image_fetched_at, metadata_fetched_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     ).run(
       id,
@@ -520,6 +651,7 @@ export function createSeries(payload: unknown): Series {
       input.description,
       input.personalNotes,
       input.status,
+      input.contentType,
       input.reread ? 1 : 0,
       input.totalRereads,
       JSON.stringify(input.rereadSessions),
@@ -558,11 +690,27 @@ export function createSeries(payload: unknown): Series {
         now,
       );
     }
+
+    const afterSnapshot = getSeriesSnapshotById(id);
+    if (!afterSnapshot) {
+      throw new Error("Failed to build operation history snapshot");
+    }
+
+    operationId = insertOperationHistory({
+      actionType: "create_series",
+      entityType: "series",
+      entityId: id,
+      before: null,
+      after: afterSnapshot,
+      undoPayload: {
+        expectedUpdatedAt: afterSnapshot.series.updatedAt,
+      },
+    });
   });
 
   tx();
 
-  return {
+  const series = {
     id,
     title: input.title,
     totalChapters: input.totalChapters,
@@ -573,6 +721,7 @@ export function createSeries(payload: unknown): Series {
     description: input.description,
     personalNotes: input.personalNotes,
     status: input.status,
+    contentType: input.contentType,
     reread: input.reread,
     totalRereads: input.totalRereads,
     rereadSessions: input.rereadSessions.map((s) => ({
@@ -594,14 +743,27 @@ export function createSeries(payload: unknown): Series {
     createdAt: now,
     updatedAt: now,
   };
+
+  return {
+    series,
+    operationId,
+  };
 }
 
-export function updateSeries(id: string, payload: unknown): Series | null {
+export function createSeries(payload: unknown): Series {
+  return createSeriesWithOperation(payload).series;
+}
+
+export function updateSeriesWithOperation(
+  id: string,
+  payload: unknown,
+): { series: Series; operationId: string } | null {
   const db = getDb();
   const input = updateSeriesSchema.parse(payload);
   const existing = getSeriesById(id);
+  const beforeSnapshot = getSeriesSnapshotById(id);
 
-  if (!existing) {
+  if (!existing || !beforeSnapshot) {
     return null;
   }
 
@@ -633,6 +795,7 @@ export function updateSeries(id: string, payload: unknown): Series | null {
       }))
     : null;
 
+  let operationId = "";
   const tx = db.transaction(() => {
     db.prepare(
       `
@@ -646,6 +809,7 @@ export function updateSeries(id: string, payload: unknown): Series | null {
         description = ?,
         personal_notes = ?,
         status = ?,
+        content_type = ?,
         reread = ?,
         total_rereads = ?,
         reread_sessions = ?,
@@ -673,6 +837,7 @@ export function updateSeries(id: string, payload: unknown): Series | null {
       merged.description,
       merged.personalNotes,
       merged.status,
+      merged.contentType,
       merged.reread ? 1 : 0,
       merged.totalRereads,
       JSON.stringify(merged.rereadSessions),
@@ -714,11 +879,30 @@ export function updateSeries(id: string, payload: unknown): Series | null {
         );
       }
     }
+
+    const afterSnapshot = getSeriesSnapshotById(id);
+    if (!afterSnapshot) {
+      throw new Error("Failed to build operation history snapshot");
+    }
+
+    const isChapterOnlyUpdate =
+      Object.keys(input).length === 1 && typeof input.chaptersRead === "number";
+
+    operationId = insertOperationHistory({
+      actionType: isChapterOnlyUpdate ? "update_chapters_read" : "update_series",
+      entityType: "series",
+      entityId: id,
+      before: beforeSnapshot,
+      after: afterSnapshot,
+      undoPayload: {
+        expectedUpdatedAt: afterSnapshot.series.updatedAt,
+      },
+    });
   });
 
   tx();
 
-  return {
+  const series = {
     ...merged,
     rereadSessions: merged.rereadSessions.map((s) => ({
       startDate: s.startDate ?? null,
@@ -732,6 +916,16 @@ export function updateSeries(id: string, payload: unknown): Series | null {
     sources: sourceEntries ?? existing.sources,
     updatedAt: now,
   };
+
+  return {
+    series,
+    operationId,
+  };
+}
+
+export function updateSeries(id: string, payload: unknown): Series | null {
+  const result = updateSeriesWithOperation(id, payload);
+  return result?.series ?? null;
 }
 
 export function getSeriesCoverById(id: string): { blob: Uint8Array; mimeType: string } | null {
@@ -750,10 +944,39 @@ export function getSeriesCoverById(id: string): { blob: Uint8Array; mimeType: st
   };
 }
 
-export function deleteSeries(id: string): boolean {
+export function deleteSeriesWithOperation(id: string): { operationId: string } | null {
+  const beforeSnapshot = getSeriesSnapshotById(id);
+  if (!beforeSnapshot) {
+    return null;
+  }
+
   const db = getDb();
-  const result = db.prepare("DELETE FROM series WHERE id = ?").run(id);
-  return result.changes > 0;
+  let operationId = "";
+
+  const run = db.transaction(() => {
+    const result = db.prepare("DELETE FROM series WHERE id = ?").run(id);
+    if (result.changes <= 0) {
+      throw new Error("Series not found");
+    }
+
+    operationId = insertOperationHistory({
+      actionType: "delete_series",
+      entityType: "series",
+      entityId: id,
+      before: beforeSnapshot,
+      after: null,
+      undoPayload: {
+        expectedUpdatedAt: beforeSnapshot.series.updatedAt,
+      },
+    });
+  });
+
+  run();
+  return { operationId };
+}
+
+export function deleteSeries(id: string): boolean {
+  return deleteSeriesWithOperation(id) !== null;
 }
 
 export function findSeriesByTitle(title: string): Series | null {
@@ -761,7 +984,7 @@ export function findSeriesByTitle(title: string): Series | null {
   const row = db
     .prepare(
       `SELECT id, title, total_chapters, chapters_read, start_date, finish_date, rating,
-              description, personal_notes, status, reread, total_rereads, reread_sessions,
+              description, personal_notes, status, content_type, reread, total_rereads, reread_sessions,
               novel_to_read, follow_updates, preferred_source_type,
               cover_image_mime_type, cover_image_fetched_at,
               metadata_fetched_at, metadata_source_url, metadata_source_site,
@@ -787,7 +1010,7 @@ export function findSeriesByCanonicalSource(site: string, canonicalId: string): 
   const row = db
     .prepare(
       `SELECT id, title, total_chapters, chapters_read, start_date, finish_date, rating,
-              description, personal_notes, status, reread, total_rereads, reread_sessions,
+              description, personal_notes, status, content_type, reread, total_rereads, reread_sessions,
               novel_to_read, follow_updates, preferred_source_type,
               cover_image_mime_type, cover_image_fetched_at,
               metadata_fetched_at, metadata_source_url, metadata_source_site,
@@ -819,6 +1042,7 @@ function buildMergedPayload(parsed: z.infer<typeof createSeriesSchema>, existing
   return {
     ...parsed,
     chaptersRead: existing.chaptersRead,
+    contentType: parsed.contentType ?? existing.contentType,
     rating: existing.rating,
     description: parsed.description?.trim() ? parsed.description : existing.description,
     personalNotes: existing.personalNotes,

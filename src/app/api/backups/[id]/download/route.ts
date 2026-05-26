@@ -1,4 +1,5 @@
-import fs from "node:fs";
+import { createReadStream } from "node:fs";
+import { Readable } from "node:stream";
 import { NextResponse } from "next/server";
 import { getBackupFileById } from "@/lib/backup-service";
 
@@ -10,14 +11,14 @@ type Params = {
 
 export async function GET(_: Request, { params }: Params) {
   const { id } = await params;
-  const backup = getBackupFileById(id);
+  const backup = await getBackupFileById(id);
 
   if (!backup) {
     return NextResponse.json({ error: "Backup not found" }, { status: 404 });
   }
 
-  const data = fs.readFileSync(backup.fullPath, "utf8");
-  return new NextResponse(data, {
+  const stream = createReadStream(backup.fullPath);
+  return new NextResponse(Readable.toWeb(stream) as ReadableStream, {
     status: 200,
     headers: {
       "Content-Type": "application/json; charset=utf-8",

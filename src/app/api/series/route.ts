@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ZodError } from "zod";
-import { createChangeBackupIfCooledDown, runDailyBackupIfNeeded } from "@/lib/backup-service";
-import { createSeries, getStatusCounts, listSeries } from "@/lib/series-repository";
+import { createChangeBackupIfCooledDown } from "@/lib/backup-service";
+import { createSeriesWithOperation, getStatusCounts, listSeries } from "@/lib/series-repository";
 
 export const runtime = "nodejs";
 
@@ -13,8 +13,6 @@ function toBoolean(value: string | null): boolean | undefined {
 }
 
 export async function GET(request: NextRequest) {
-  runDailyBackupIfNeeded();
-
   const { searchParams } = new URL(request.url);
   const filters = {
     query: searchParams.get("query") || undefined,
@@ -48,9 +46,12 @@ export async function POST(request: NextRequest) {
     if (typeof payload.coverImageBase64 === "string" && payload.coverImageBase64.trim()) {
       payload.coverImageBlob = Buffer.from(payload.coverImageBase64, "base64");
     }
-    const created = createSeries(payload);
-    createChangeBackupIfCooledDown();
-    return NextResponse.json({ data: created }, { status: 201 });
+    const created = createSeriesWithOperation(payload);
+    await createChangeBackupIfCooledDown();
+    return NextResponse.json(
+      { data: created.series, meta: { operationId: created.operationId } },
+      { status: 201 },
+    );
   } catch (error) {
     if (error instanceof ZodError) {
       return NextResponse.json({ error: error.flatten() }, { status: 400 });

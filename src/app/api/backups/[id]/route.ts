@@ -9,7 +9,7 @@ type Params = {
 
 export async function DELETE(_: Request, { params }: Params) {
   const { id } = await params;
-  const deleted = deleteBackupById(id);
+  const deleted = await deleteBackupById(id);
 
   if (!deleted) {
     return NextResponse.json({ error: "Backup not found" }, { status: 404 });
